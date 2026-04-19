@@ -1,30 +1,49 @@
 # scripts/
 
-Phase B 以降で実装する補助スクリプト群のプレースホルダ。
+Photosaver / HPSS プロジェクトの補助スクリプト群。Node.js 20 ESM で実装。
 
-## 実装予定のスクリプト
+## 実装済みスクリプト
 
 | ファイル | 用途 |
 |---|---|
-| `check-drive.mjs` | 外付けドライブ(`PHOTO_STORAGE_PATH`)の接続・書き込み可・空き容量を検証 |
-| `generate-hash.mjs` | bcrypt ハッシュ生成(album-guard 未起動時にも使える) |
-| `verify-env.mjs` | `.env` / `immich/.env` に必須変数が埋まっているか検証 |
+| `check-drive.mjs` | 外付けドライブ(`PHOTO_STORAGE_PATH`)の接続・書込・空き容量・Docker File Sharing 検証 |
+| `generate-hash.mjs` | bcrypt 10 ラウンドでパスワードハッシュ生成(stdin 推奨、album-guard 未起動時の代替) |
+| `verify-env.mjs` | `.env` / `immich/.env` に必須キー + placeholder が残っていないか検査 |
+| `cloudflare-setup.mjs` | Cloudflare API で tunnel 作成 + ingress 設定 + DNS CNAME 作成(冪等) |
+| `cloudflare-verify.mjs` | tunnel active / DNS / HTTP E2E の 3 レイヤ検証 |
+| `_env.mjs` | `.env` / `immich/.env` を読み込む内部ユーティリティ |
+
+## Phase B 以降で実装予定
+
+| ファイル | 用途 |
+|---|---|
 | `seed-albums.mjs` | 複数アルバムのパスワードを CSV から一括登録 |
 | `backup.mjs` | `PHOTO_STORAGE_PATH` を別ドライブに robocopy で差分バックアップ |
 
-## 実行方法(将来)
+## 実行方法
 
 各スクリプトは Node.js 20 で直接実行:
 
-```powershell
+```bash
 node scripts/check-drive.mjs
-node scripts/generate-hash.mjs "my-password"
+echo "my-password" | node scripts/generate-hash.mjs
+node scripts/verify-env.mjs
+node scripts/cloudflare-setup.mjs
+node scripts/cloudflare-verify.mjs
 ```
+
+## 終了コード規約
+
+| code | 意味 |
+|---|---|
+| 0 | 成功 |
+| 1 | 検証失敗 / ユーザー対処が必要 |
+| 2 | 環境不備(.env がない等) |
 
 ## 作成時のルール
 
-- ES Modules (`.mjs`) を使用(単体実行中心)
+- ES Modules (`.mjs`) を使用
 - 依存は `album-guard/package.json` のものを流用(`cd album-guard && npm install` が前提)
 - 破壊的操作(削除・上書き)は `--confirm` フラグ必須
 - パスワード等のシークレットを引数で受ける場合、`process.argv` ではなく `stdin` を推奨(shell history に残さない)
-- 終了コード: 0=成功 / 1=検証失敗 / 2=環境不備
+- Cloudflare/GitHub などの外部 API 呼び出しは Node 20 built-in `fetch` を直接使う(追加 dep を避ける)
