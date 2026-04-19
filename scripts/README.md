@@ -9,8 +9,7 @@ Photosaver / HPSS プロジェクトの補助スクリプト群。Node.js 20 ESM
 | `check-drive.mjs` | 外付けドライブ(`PHOTO_STORAGE_PATH`)の接続・書込・空き容量・Docker File Sharing 検証 |
 | `generate-hash.mjs` | bcrypt 10 ラウンドでパスワードハッシュ生成(stdin 推奨、album-guard 未起動時の代替) |
 | `verify-env.mjs` | `.env` / `immich/.env` に必須キー + placeholder が残っていないか検査 |
-| `cloudflare-setup.mjs` | Cloudflare API で tunnel 作成 + ingress 設定 + DNS CNAME 作成(冪等) |
-| `cloudflare-verify.mjs` | tunnel active / DNS / HTTP E2E の 3 レイヤ検証 |
+| `tailscale-verify.mjs` | Tailscale CLI 検出 + status + serve 設定 + album-guard 到達性の統合検証 |
 | `_env.mjs` | `.env` / `immich/.env` を読み込む内部ユーティリティ |
 
 ## Phase B 以降で実装予定
@@ -28,8 +27,7 @@ Photosaver / HPSS プロジェクトの補助スクリプト群。Node.js 20 ESM
 node scripts/check-drive.mjs
 echo "my-password" | node scripts/generate-hash.mjs
 node scripts/verify-env.mjs
-node scripts/cloudflare-setup.mjs
-node scripts/cloudflare-verify.mjs
+node scripts/tailscale-verify.mjs
 ```
 
 ## 終了コード規約
@@ -46,4 +44,5 @@ node scripts/cloudflare-verify.mjs
 - 依存は `album-guard/package.json` のものを流用(`cd album-guard && npm install` が前提)
 - 破壊的操作(削除・上書き)は `--confirm` フラグ必須
 - パスワード等のシークレットを引数で受ける場合、`process.argv` ではなく `stdin` を推奨(shell history に残さない)
-- Cloudflare/GitHub などの外部 API 呼び出しは Node 20 built-in `fetch` を直接使う(追加 dep を避ける)
+- 外部 API 呼び出し(GitHub 等)は Node 20 built-in `fetch` を直接使う(追加 dep を避ける)
+- CLI 呼び出し(`tailscale`, `docker` 等)は `execSync` を使い、失敗時は明確なエラーと次アクションを表示する

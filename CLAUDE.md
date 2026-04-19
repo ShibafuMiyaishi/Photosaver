@@ -9,7 +9,7 @@ password authentication. Implements Phase 11 of the HPSS spec.
 - **album-guard** (`album-guard/`) — Node.js/Express reverse proxy in front of Immich.
   JWT + bcrypt auth per album UUID. Hot-reload password config.
 - **Immich stack** (`immich/docker-compose.yml`) — upstream photo management server +
-  ML + db + redis + cloudflared.
+  ML + db + redis. Remote access is via **Tailscale** on the host (no domain, no public URL).
 - **Photo data** — lives on an **external drive** (currently `E:/Photo` on a 64GB USB
   for first-time testing). Path is stored in `PHOTO_STORAGE_PATH` env — never hardcode.
 - **Docs** — human-facing docs in `docs/` (Japanese).
@@ -36,7 +36,8 @@ wires `immich/docker-compose.yml`, tests, and CI.
 
 ## Architecture (one-liner)
 
-Browser/mobile → Cloudflare Tunnel → **album-guard:3000** (auth check) →
+Browser/mobile (Tailscale client) → Tailscale WireGuard mesh → host's
+`tailscale serve --https=443` → `localhost:3000` = **album-guard** (auth check) →
 **immich-server:2283**. Album API endpoints (`/api/albums/:uuid*`) are intercepted and
 require `X-Album-Token` (JWT) if the UUID is listed in `album-passwords.json`.
 
@@ -54,7 +55,7 @@ Full detail: `@docs/architecture.md`.
 
 ## Critical invariants (NEVER violate)
 
-1. **Secrets stay in env.** `GUARD_JWT_SECRET`, Cloudflare token — env vars only.
+1. **Secrets stay in env.** `GUARD_JWT_SECRET`, `DB_PASSWORD` — env vars only.
    Never in source, never in git-tracked files.
 2. **`album-passwords.json` is NOT in git.** Lives on external drive
    (`${PHOTO_STORAGE_PATH}/guard/`), bind-mounted into the container.
@@ -92,7 +93,7 @@ Full detail: `@docs/architecture.md`.
 - External-drive setup / Docker file sharing → `@docs/external-drive.md`
 - Start / stop / logs / troubleshoot → `@docs/operations.md`
 - Component responsibilities → `@docs/architecture.md`
-- Cloudflare Tunnel setup → `@docs/cloudflare-tunnel.md`
+- Tailscale remote access setup → `@docs/tailscale.md`
 - Future Immich-UI password integration → `@docs/phase-11.5-design.md`
 
 ## Path-scoped rules
@@ -118,7 +119,7 @@ Before editing any of these, consult the matching rule file in `.claude/rules/`:
 - `auth-reviewer` — security review of JWT / bcrypt / auth code. Invoke before
   committing changes to `auth.js` or the `/album-guard/auth` endpoint.
 - `docker-debugger` — docker-compose networking, bind mounts, health checks,
-  Cloudflare Tunnel upstream resolution.
+  Tailscale serve HTTPS issues, upstream resolution.
 
 ## Language
 

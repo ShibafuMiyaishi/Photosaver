@@ -5,14 +5,15 @@ HPSS / Photosaver のコンポーネント構成と通信経路。
 ## 全体像
 
 ```
-[スマホアプリ / ブラウザ]
+[スマホアプリ / ブラウザ (Tailscale client)]
         │
         ▼
-[Cloudflare Tunnel]         photos.yourdomain.com
+[Tailscale WireGuard mesh VPN]
         │
         ▼
-[cloudflared コンテナ]       ← Cloudflare エッジ接続
-        │
+[家の Windows PC (Tailscale installed)]
+        │  https://<host>.<tailnet>.ts.net 終端
+        │  (`tailscale serve --https=443 → localhost:3000`)
         ▼
 [album-guard :3000]         ← 認証プロキシ (Phase 11 追加)
         │
@@ -37,7 +38,7 @@ HPSS / Photosaver のコンポーネント構成と通信経路。
 Node.js / Express 製リバースプロキシ。本プロジェクトの中核。
 
 - **役割**: アルバム単位のパスワード認証を API レベルで実施
-- **ポート**: 3000(内部のみ、Cloudflare 経由で公開)
+- **ポート**: 3000(`127.0.0.1` バインド、Tailscale serve 経由で HTTPS 公開)
 - **ソース**: `album-guard/src/`
 - **データ**: `album-passwords.json`(`E:\Photo\guard\` に配置、bind-mount)
 - **認証方式**: bcrypt パスワードハッシュ + HS256 JWT トークン
@@ -70,17 +71,20 @@ OSS 写真管理プラットフォーム。
 - **immich-db**: PostgreSQL メタデータストア
 - **immich-redis**: ジョブキュー
 
-### cloudflared
-Cloudflare Tunnel のエッジエージェント。HTTPS 終端と外部公開を担う。
+### Tailscale(ホスト OS にインストール)
+Photosaver の外部公開を担う。WireGuard ベースのメッシュ VPN。
 
-- Cloudflare Dashboard で設定したトンネルに接続
-- 公開ホスト名 → **album-guard:3000** に転送(**immich-server:2283 ではない** — 仕様書 11.5.2 参照)
+- ドメイン不要・クレジットカード不要・無料(3 ユーザー + 100 デバイスまで)
+- `tailscale serve --bg --https=443 localhost:3000` で HTTPS 終端 + album-guard への転送
+- 到達可能なのは tailnet に招待された端末のみ(パブリック URL ではない)
+- 仕様書 11.5.2 の Cloudflare Tunnel 方式は未使用(ドメイン必須のため本プロジェクトでは代替)
 
 ## リクエストフロー
 
 ### パスワードなしアルバム
 ```
-Client → Cloudflare → album-guard (UUID 照合 → 保護対象外)
+Client (Tailscale) → Tailscale serve (HTTPS 終端)
+       → album-guard (UUID 照合 → 保護対象外)
        → immich-server → レスポンス
 ```
 
@@ -123,5 +127,5 @@ Client → POST /album-guard/auth { albumId, password }
 - 運用手順: [operations.md](operations.md)
 - パスワード管理: [password-management.md](password-management.md)
 - 外付けドライブ: [external-drive.md](external-drive.md)
-- Cloudflare: [cloudflare-tunnel.md](cloudflare-tunnel.md)
+- Tailscale リモートアクセス: [tailscale.md](tailscale.md)
 - Phase 11.5 設計: [phase-11.5-design.md](phase-11.5-design.md)

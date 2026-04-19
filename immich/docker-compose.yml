@@ -1,9 +1,12 @@
 # immich/docker-compose.yml
-# HPSS Phase 11 — Immich スタック + album-guard リバースプロキシ + (optional) cloudflared。
+# HPSS Phase 11 — Immich スタック + album-guard リバースプロキシ。
 #
 # 起動:
-#   ローカル専用:  docker compose up -d --build
-#   Cloudflare Tunnel 込:  docker compose --profile public up -d --build
+#   docker compose up -d --build
+#
+# 外部アクセスはホスト OS の Tailscale が担う:
+#   ホストで `tailscale serve --bg --https=443 localhost:3000` を実行
+#   → https://<host>.<tailnet>.ts.net で全 Tailscale デバイスから到達可
 #
 # 写真データは ${PHOTO_STORAGE_PATH}(外付けドライブ)に保存する。
 # 設定値は immich/.env から注入される。
@@ -115,22 +118,8 @@ services:
     networks:
       - default
 
-  cloudflared:
-    container_name: cloudflared
-    image: cloudflare/cloudflared:latest
-    restart: always
-    profiles: ['public']
-    command:
-      - tunnel
-      - --no-autoupdate
-      - run
-      - --token
-      - ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN must be set when --profile public is used}
-    depends_on:
-      album-guard:
-        condition: service_healthy
-    networks:
-      - default
+  # 外部公開は Tailscale(host に install + `tailscale serve --bg --https=443 localhost:3000`)
+  # ドメイン不要・無料・認証された Tailscale デバイスからのみ HTTPS アクセス。詳細: docs/tailscale.md
 
 volumes:
   immich-postgres:

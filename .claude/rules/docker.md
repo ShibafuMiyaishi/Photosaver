@@ -8,7 +8,6 @@ paths: "**/Dockerfile, **/docker-compose*.yml, **/docker-compose*.yaml"
 - **album-guard**: `node:20-alpine` (per spec). Do NOT switch to `node:20-slim` or
   Debian-based without a documented reason.
 - **Immich**: use the official `ghcr.io/immich-app/immich-*` images.
-- **cloudflared**: `cloudflare/cloudflared:latest` (official).
 
 ## Dockerfile
 
@@ -34,16 +33,20 @@ paths: "**/Dockerfile, **/docker-compose*.yml, **/docker-compose*.yaml"
 
 ## Profiles
 
-For optional services (e.g., cloudflared in local-only mode), use compose profiles:
+For optional services (future additions), use compose profiles. Example pattern:
 
 ```yaml
-cloudflared:
-  profiles: ["public"]
+some-optional-service:
+  profiles: ["extra"]
   # ...
 ```
 
-- Local-only: `docker compose up -d`
-- Public: `docker compose --profile public up -d`
+- Default (without profile): `docker compose up -d`
+- With profile: `docker compose --profile extra up -d`
+
+External access: Photosaver's remote exposure is handled by Tailscale running on the host
+(not as a compose service). Do not add public-tunnel services to this compose file without
+a documented reason — see `docs/tailscale.md`.
 
 ## Environment files
 

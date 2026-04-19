@@ -1,6 +1,6 @@
 ---
 name: compose-up
-description: Bring up the full HPSS stack (Immich + album-guard + optional cloudflared) and verify each component is healthy. Runs drive-check, then docker compose build+up, then polls health endpoints. Use when user says "起動" / "start" / "compose up" / "スタック起動".
+description: Bring up the full HPSS stack (Immich + album-guard) and verify each component is healthy. Runs drive-check, then docker compose build+up, then polls health endpoints. External access is provided by Tailscale running on the host (not a compose service). Use when user says "起動" / "start" / "compose up" / "スタック起動".
 allowed-tools: Bash(docker *), Bash(curl *), Bash(test *)
 ---
 
@@ -46,8 +46,8 @@ Start the full stack and confirm each component reaches a healthy state.
 - **immich-db unhealthy** → check `DB_PASSWORD` consistency (must match across services)
 - **immich-server unhealthy** → usually cold-start (wait another 60s). If still failing,
   tail its logs for migration errors.
-- **cloudflared unhealthy** → may be intentional in local-only mode; check if
-  `CLOUDFLARE_TUNNEL_TOKEN` is blank.
+- **Tailscale serve not responding** → out of compose's scope. Suggest user run
+  `node scripts/tailscale-verify.mjs` for host-side diagnosis.
 
 ## After a successful start
 

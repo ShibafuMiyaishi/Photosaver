@@ -19,8 +19,7 @@ When working with any of these files:
 
 ## Template files (`.env.example`)
 
-- Use placeholder values only (e.g., `CHANGE_ME_32_CHAR_RANDOM`,
-  `your-cloudflare-tunnel-token-here`).
+- Use placeholder values only (e.g., `CHANGE_ME_32_CHAR_RANDOM`).
 - Real secrets live ONLY in the non-`.example` version, which is gitignored.
 
 ## Rotation
