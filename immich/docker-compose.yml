@@ -1,0 +1,141 @@
+# immich/docker-compose.yml
+# HPSS Phase 11 — Immich スタック + album-guard リバースプロキシ + (optional) cloudflared。
+#
+# 起動:
+#   ローカル専用:  docker compose up -d --build
+#   Cloudflare Tunnel 込:  docker compose --profile public up -d --build
+#
+# 写真データは ${PHOTO_STORAGE_PATH}(外付けドライブ)に保存する。
+# 設定値は immich/.env から注入される。
+
+name: hpss
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    restart: always
+    volumes:
+      - ${PHOTO_STORAGE_PATH}/immich-library:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    ports: []
+    depends_on:
+      immich-redis:
+        condition: service_healthy
+      immich-db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:2283/api/server/ping']
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - default
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    restart: always
+    volumes:
+      - immich-model-cache:/cache
+    env_file:
+      - .env
+    networks:
+      - default
+
+  immich-db:
+    container_name: immich_postgres
+    image: ${IMMICH_DB_IMAGE:-ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0}
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+      DB_STORAGE_TYPE: 'HDD'
+    volumes:
+      - immich-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |-
+          pg_isready --dbname="$${POSTGRES_DB}" --username="$${POSTGRES_USER}" || exit 1;
+          Chksum="$$(psql --dbname="$${POSTGRES_DB}" --username="$${POSTGRES_USER}" --tuples-only --no-align \
+            --command='SELECT COALESCE(SUM(checksum_failures), 0) FROM pg_stat_database')";
+          echo "checksum failure count is $$Chksum";
+          [ "$$Chksum" = '0' ] || exit 1
+      interval: 5m
+      start_interval: 30s
+      start_period: 5m
+    networks:
+      - default
+
+  immich-redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:8-bookworm@sha256:ff21bc0f8194dc9c105b769aeabf9585fea6a8ed649c0781caeac5cb3c247884
+    restart: always
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  album-guard:
+    container_name: album_guard
+    build:
+      context: ../album-guard
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - GUARD_PORT=${GUARD_PORT:-3000}
+      - IMMICH_INTERNAL_URL=http://immich-server:2283
+      - GUARD_JWT_SECRET=${GUARD_JWT_SECRET:?GUARD_JWT_SECRET must be set (openssl rand -hex 32)}
+      - GUARD_JWT_EXPIRES_IN=${GUARD_JWT_EXPIRES_IN:-24h}
+      - GUARD_PASSWORDS_FILE=${GUARD_PASSWORDS_FILE:-/app/data/album-passwords.json}
+      - GUARD_LOG_FORMAT=${GUARD_LOG_FORMAT:-combined}
+    volumes:
+      # album-passwords.json を外付けドライブからマウント(ホットリロード対応)。
+      - ${PHOTO_STORAGE_PATH}/guard:/app/data
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      immich-server:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000/album-guard/health']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - default
+
+  cloudflared:
+    container_name: cloudflared
+    image: cloudflare/cloudflared:latest
+    restart: always
+    profiles: ['public']
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN must be set when --profile public is used}
+    depends_on:
+      album-guard:
+        condition: service_healthy
+    networks:
+      - default
+
+volumes:
+  immich-postgres:
+  immich-model-cache:
+
+networks:
+  default:
+    name: hpss_default

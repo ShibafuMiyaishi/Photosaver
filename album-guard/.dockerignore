@@ -1,0 +1,14 @@
+node_modules
+test
+coverage
+.vitest-cache
+eslint.config.js
+.prettierrc
+.editorconfig
+.dockerignore
+.gitignore
+README.md
+Dockerfile
+*.log
+.env
+.env.*
