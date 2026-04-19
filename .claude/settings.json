@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(docker compose *)",
+      "Bash(docker ps *)",
+      "Bash(docker logs *)",
+      "Bash(docker inspect *)",
+      "Bash(docker exec *)",
+      "Bash(docker build *)",
+      "Bash(docker image *)",
+      "Bash(docker network *)",
+      "Bash(docker volume ls *)",
+      "Bash(git status *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git restore *)",
+      "Bash(curl *)",
+      "Bash(openssl *)",
+      "Bash(wget *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh run *)",
+      "Bash(gh workflow *)",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "deny": [
+      "Bash(git reset --hard *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git checkout -- *)",
+      "Bash(git clean -fd *)",
+      "Bash(git clean -fdx *)",
+      "Bash(rm -rf *)",
+      "Bash(rm -rf /)",
+      "Bash(docker system prune *)",
+      "Bash(docker volume rm *)",
+      "Read(./.env)",
+      "Read(./immich/.env)",
+      "Read(**/album-passwords.json)",
+      "Write(./.env)",
+      "Write(./immich/.env)",
+      "Write(**/album-passwords.json)"
+    ]
+  },
+  "env": {
+    "NODE_ENV": "development",
+    "ALBUM_GUARD_TEST_PORT": "3001"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git status --short 2>/dev/null | head -20 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

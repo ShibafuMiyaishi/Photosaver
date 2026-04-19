@@ -1,0 +1,24 @@
+# Normalize all text files to LF (Docker and Node dislike CRLF on Windows)
+* text=auto eol=lf
+
+*.js       text eol=lf
+*.mjs      text eol=lf
+*.cjs      text eol=lf
+*.json     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.md       text eol=lf
+*.sh       text eol=lf
+*.env      text eol=lf
+
+Dockerfile text eol=lf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.docx binary
+*.zip  binary
+*.webp binary

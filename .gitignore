@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+
+# Env files (NEVER commit real env files)
+.env
+.env.local
+.env.*.local
+immich/.env
+
+# Secrets
+album-passwords.json
+*.pem
+*.key
+!*.example.key
+
+# Build outputs
+dist/
+build/
+out/
+coverage/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Test caches
+.vitest-cache/
+.nyc_output/
+
+# Repo-relative tmp workspace (all test code output, debug logs, Playwright traces)
+# See .claude/rules/testing.md
+tmp/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Claude Code personal overrides
+.claude/settings.local.json
+
+# Docker personal overrides
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Photo data (defense in depth — should live on external drive, never in repo)
+data/photos/
+data/immich-library/
+/Photo/

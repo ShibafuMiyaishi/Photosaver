@@ -1,0 +1,38 @@
+# Runs on every push and PR once Phase B creates album-guard/package.json.
+# The hashFiles guard makes this a no-op until the file exists.
+name: Lint and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    # Skip automatically until Phase B creates album-guard/package.json.
+    if: ${{ hashFiles('album-guard/package.json') != '' }}
+    defaults:
+      run:
+        working-directory: album-guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: album-guard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Unit tests
+        run: npm test --if-present
+        env:
+          GUARD_JWT_SECRET: ci-test-secret-do-not-use-in-production-0000000000000000
