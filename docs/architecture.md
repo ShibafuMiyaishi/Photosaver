@@ -1,131 +1,85 @@
-# システム構成
+# システム構成(Photosaver v2)
 
-HPSS / Photosaver のコンポーネント構成と通信経路。
+専用 Linux ミニ PC 上の Immich を、Tailscale 経由で家族・友達と共有する構成。
 
 ## 全体像
 
 ```
-[スマホアプリ / ブラウザ (Tailscale client)]
+[家族・友達のスマホ (Tailscale + Immich 公式アプリ)]
+        │  node sharing で招待(人数無制限・無料)
+        ▼
+[Tailscale WireGuard mesh]
+        │  https://photosaver.<tailnet>.ts.net(正規の Let's Encrypt 証明書)
+        ▼
+[ミニ PC: Ubuntu Server 24.04 / OptiPlex 7070 Micro]
+        │  tailscale serve --bg --https=443 → 127.0.0.1:2283
+        ▼
+[immich-server :2283]  ← マルチユーザー・クォータ・共有アルバム(Immich 標準機能)
+        ├─ immich-machine-learning(CPU 推論、QSV トランスコードは server 側)
+        ├─ immich_postgres ─→ 内蔵 NVMe (ext4)  /srv/photosaver/postgres
+        ├─ immich_redis (Valkey)
+        └─ mount-guard ─→ HDD マーカーファイル検証(未マウント時は起動阻止)
         │
         ▼
-[Tailscale WireGuard mesh VPN]
-        │
-        ▼
-[家の Windows PC (Tailscale installed)]
-        │  https://<host>.<tailnet>.ts.net 終端
-        │  (`tailscale serve --https=443 → localhost:3000`)
-        ▼
-[album-guard :3000]         ← 認証プロキシ (Phase 11 追加)
-        │
-        ├─ /api/albums/:uuid*  → アルバム UUID 単位で認証チェック
-        ├─ /album-guard/*      → ログイン/管理画面(カスタム UI)
-        └─ その他              → 透過通過
-        │
-        ▼
-[immich-server :2283]       ← 写真管理 OSS 本体
-        │
-        ├─ immich-machine-learning
-        ├─ immich-db (Postgres)
-        └─ immich-redis
-        │
-        ▼
-[外付けドライブ E:\Photo]   ← 写真データ本体
+[外付け HDD 4TB (Btrfs) /mnt/photo]  ← 写真原本 + 日次 DB ダンプ
 ```
+
+## 設計方針(最重要)
+
+**このシステムは「イベント写真の一時共有置き場」であり、恒久アーカイブではない。**
+
+- 結婚式・旅行などでみんなが撮った写真を集めて、見て、各自が欲しいものを
+  端末に保存するための場所
+- **写真原本のバックアップは意図的に持たない**(HDD 故障 = 写真喪失を許容する)。
+  この前提は参加者全員に共有する:「残したい写真は自分の端末に保存」
+- 無料でできる保険だけ実施: Immich の日次 DB ダンプ(HDD 上、14世代)+
+  cron で NVMe へミラー(`server/scripts/sync-db-dumps.sh`)。
+  HDD が死んでも「何がいつ誰からアップされたか」の記録は残る
+- 容量が逼迫したら大容量 HDD に買い替えて移行する(拡張パス: [operations.md](operations.md))
 
 ## コンポーネント責務
 
-### album-guard (Phase 11 新規)
-Node.js / Express 製リバースプロキシ。本プロジェクトの中核。
-
-- **役割**: アルバム単位のパスワード認証を API レベルで実施
-- **ポート**: 3000(`127.0.0.1` バインド、Tailscale serve 経由で HTTPS 公開)
-- **ソース**: `album-guard/src/`
-- **データ**: `album-passwords.json`(`E:\Photo\guard\` に配置、bind-mount)
-- **認証方式**: bcrypt パスワードハッシュ + HS256 JWT トークン
-- **ホットリロード**: `album-passwords.json` の変更を `fs.watch` で検知、自動再読込
-
-#### 保護対象エンドポイント(仕様書 11.1.3)
-
-| エンドポイント | 挙動 |
+| コンポーネント | 責務 |
 |---|---|
-| `GET /api/albums/:uuid` | 保護対象 UUID の場合 401 |
-| `GET /api/albums/:uuid/assets` | 同上 |
-| `PUT /api/albums/:uuid/assets` | 同上 |
-| `DELETE /api/albums/:uuid/assets` | 同上 |
-| `GET /api/assets/:id` | 現時点では素通し(制限事項、後述) |
-| その他 `/api/*` | 素通し |
+| Immich(v3 系にピン) | 写真管理のすべて。マルチユーザー、クォータ、共有アルバム、ML 検索 |
+| Tailscale(node sharing) | 認証済みデバイスだけに到達性を与える。公開 URL は存在しない |
+| tailscale serve | HTTPS 終端(ts.net の正規証明書)→ localhost:2283 |
+| mount-guard(compose 内) | HDD 未マウント時の「空ディレクトリへの書き込み事故」防止 |
+| Btrfs(HDD) | 月次 scrub によるビット腐敗検知(検知のみ。修復用の複製は無い) |
+| ext4(NVMe) | OS / Docker / Postgres。DB は CoW ファイルシステムに置かない |
 
-#### 独自エンドポイント
+## 採用しなかった構成とその理由
 
-- `POST /album-guard/auth` — パスワード検証 → JWT 発行
-- `POST /album-guard/hash` — bcrypt ハッシュ生成(管理者用)
-- `GET /album-guard/health` — ヘルスチェック
-- `GET /album-guard/login?albumId=X` — ブラウザ用ログイン画面
-- `GET /album-guard/inject.js` — ブラウザ向けトークン自動付与スクリプト(Phase 11.5 で本格活用)
+| 案 | 却下理由 |
+|---|---|
+| album-guard(自作認証プロキシ)継続 | Immich v3 でアルバム内アセット列挙が `POST /api/search/metadata` に移り、パス intercept 型の保護に構造的な抜けが発生。標準のマルチユーザー + クォータで要件を満たせる。コードは学習成果として `album-guard/` に凍結保存 |
+| Cloudflare Tunnel + 独自ドメイン公開 | 無料プランの 100MB リクエスト上限 × Immich にチャンクアップロード無し → スマホ動画のバックアップが壊れる。公開面の攻撃リスクも増える |
+| Immich Public Proxy (IPP) | 「アプリを入れない人に共有リンクだけ見せる」用途の優れた既製品。現構成では全員がアプリ利用者なので不要。需要が出たら Tailscale Funnel + IPP を後付け(構成変更ゼロで追加可能) |
+| NAS | 普及帯 NAS は CPU が弱く Immich の ML に不向き。NFS のランダム IOPS はローカルの数百分の一 |
+| RAID / バックアップドライブ | 「一時置き場」の設計方針に対して過剰投資。クォータと容量監視で運用する |
 
-### Immich (upstream、改造しない)
-OSS 写真管理プラットフォーム。
+## セキュリティモデル
 
-- **immich-server**: Web UI + REST API、内部ポート 2283
-- **immich-machine-learning**: 顔認識・物体検出・検索インデックス
-- **immich-db**: PostgreSQL メタデータストア
-- **immich-redis**: ジョブキュー
+- **到達性 = tailnet 招待者のみ**。ポート開放なし、公開 URL なし。
+  Immich 公式も推奨する方式(「ゼロデイがあっても危険に晒されない」)
+- アカウントは管理者(自分)が発行。友達は viewer/editor 権限の共有アルバムでやりとり
+- 万一の共有ニーズ拡大時も、公開するのは読み取り専用の IPP に限定する(Immich 本体は非公開を維持)
 
-### Tailscale(ホスト OS にインストール)
-Photosaver の外部公開を担う。WireGuard ベースのメッシュ VPN。
+## データ配置
 
-- ドメイン不要・クレジットカード不要・無料(3 ユーザー + 100 デバイスまで)
-- `tailscale serve --bg --https=443 localhost:3000` で HTTPS 終端 + album-guard への転送
-- 到達可能なのは tailnet に招待された端末のみ(パブリック URL ではない)
-- 仕様書 11.5.2 の Cloudflare Tunnel 方式は未使用(ドメイン必須のため本プロジェクトでは代替)
-
-## リクエストフロー
-
-### パスワードなしアルバム
-```
-Client (Tailscale) → Tailscale serve (HTTPS 終端)
-       → album-guard (UUID 照合 → 保護対象外)
-       → immich-server → レスポンス
-```
-
-### パスワード付きアルバム(未認証)
-```
-Client → album-guard (UUID 保護対象、X-Album-Token なし)
-       → 401 Unauthorized + エラー JSON
-```
-
-### パスワード付きアルバム(認証済み)
-```
-Client → album-guard (UUID 保護対象、X-Album-Token 検証成功)
-       → immich-server → レスポンス
-```
-
-### パスワード認証フロー
-```
-Client → POST /album-guard/auth { albumId, password }
-       → album-guard が bcrypt 比較
-       → 成功時 JWT を返却
-       → Client が X-Album-Token ヘッダーに付けて以降のリクエストを発行
-```
-
-## 設計上の制限事項
-
-- `/api/assets/:assetId` の直接アクセスは、アルバム紐付けの確認コストが高いため **保護対象外**。アルバム一覧・アルバム内写真一覧を保護することで「存在・内容が見えない」実用的保護を達成する
-- Immich 公式スマホアプリは `X-Album-Token` 送信機能を持たないため、パスワード付きアルバムはブラウザ利用を推奨
-- ブラウザで Immich Web UI を開くと、現 MVP では 401 エラーが直接見える(UX が悪い)。これは **Phase 11.5** で HTML 自動注入により解決予定
-
-## データフローとストレージ
-
-| データ | 保存先 | 理由 |
-|---|---|---|
-| 写真ファイル本体 | `E:\Photo\immich-library\` | 容量大、外付けで拡張可能 |
-| Immich メタデータ (DB) | Docker volume(ローカル) | 再起動耐性、小容量 |
-| `album-passwords.json` | `E:\Photo\guard\` | 「ドライブ抜去 = 全オフライン」の物理セキュリティ整合 |
-| `.env` secrets | ローカルファイル(gitignore) | 流出防止 |
+| データ | 場所 | FS | 理由 |
+|---|---|---|---|
+| 写真原本(`upload/` `library/` `profile/`) | `/mnt/photo/immich-library` | Btrfs | scrub で劣化検知、大容量 HDD |
+| サムネイル・変換動画 | 同上(再生成可能) | Btrfs | 容量が大きいだけで消えても再生成可 |
+| Postgres データ | `/srv/photosaver/postgres` | ext4 (NVMe) | 公式要件: ローカル SSD、CoW 回避 |
+| DB ダンプ | `/mnt/photo/.../backups/` + NVMe ミラー | 両方 | 唯一の多重化データ |
+| compose / .env | `/srv/photosaver/` | ext4 (NVMe) | リポジトリ `server/` からコピー |
 
 ## 関連ドキュメント
-- 運用手順: [operations.md](operations.md)
-- パスワード管理: [password-management.md](password-management.md)
-- 外付けドライブ: [external-drive.md](external-drive.md)
-- Tailscale リモートアクセス: [tailscale.md](tailscale.md)
-- Phase 11.5 設計: [phase-11.5-design.md](phase-11.5-design.md)
+
+- 機材と選定理由: [hardware.md](hardware.md)
+- セットアップ手順: [new-server-setup.md](new-server-setup.md)
+- 移行手順: [migration-runbook.md](migration-runbook.md)
+- 日常運用: [operations.md](operations.md)
+- Tailscale 詳細: [tailscale.md](tailscale.md)
+- 旧設計(album-guard 時代)の資料: [legacy/](legacy/)

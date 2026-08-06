@@ -1,196 +1,101 @@
-# 運用手順
+# 運用手順(Photosaver v2)
 
-HPSS / Photosaver 環境の起動・停止・ログ・トラブルシューティングの運用マニュアル。
+新サーバー(Ubuntu ミニ PC)の日常運用。セットアップは [new-server-setup.md](new-server-setup.md)。
 
-## 前提条件
+## 日常: やることは基本ない
 
-- Windows 11 + Docker Desktop
-- Node.js 20+(ローカル開発用)
-- 外付けドライブを `E:\`(または任意のパス)に接続済み
-- Tailscale アカウント(無料、ドメイン不要・クレカ不要)
-  (リモートアクセス用。詳細: [tailscale.md](tailscale.md))
+- 自動で動いているもの: OS のセキュリティ自動更新(docker 除外・04:00 自動再起動)、
+  Immich の日次 DB ダンプ(02:00)、DB ダンプの NVMe ミラー(03:00 cron)、
+  Btrfs 月次 scrub
+- コンテナは `restart: always` で電源断・再起動から自動復帰する
 
-## 初回セットアップ
+## 月次: Immich アップデート(15 分)
 
-### 1. リポジトリ取得
-```powershell
-cd C:\Users\fumiy\Desktop\code
-git clone git@github.com:ShibafuMiyaishi/Photosaver.git
-cd Photosaver
-```
+Immich はスマホアプリが自動更新される一方、**サーバーは自分のメジャーと同じ
+アプリまでしかサポートしない**。放置するとある日友達のアプリが
+「サーバーのバージョンが古い」エラーで使えなくなるため、**月 1 回の更新を習慣化**する。
 
-### 2. 外付けドライブ準備
-詳細: [external-drive.md](external-drive.md)
-
-```powershell
-mkdir E:\Photo\immich-library
-mkdir E:\Photo\guard
-echo. > E:\Photo\.drive-check
-echo {} > E:\Photo\guard\album-passwords.json
-```
-
-### 3. Docker Desktop File Sharing
-Settings → Resources → File sharing → `E:\` を追加 → Apply & Restart
-
-### 4. 環境変数ファイル作成
-```powershell
-copy .env.example .env
-copy immich\.env.example immich\.env
-```
-
-`immich/.env` の以下を必ず変更:
-- `DB_PASSWORD` — 強力なランダム文字列
-- `GUARD_JWT_SECRET` — 32 文字以上のランダム文字列(生成: `openssl rand -hex 32`)
-
-### 5. Tailscale インストール + tailnet 作成
-詳細: [tailscale.md](tailscale.md)
-
-1. [https://tailscale.com/download/windows](https://tailscale.com/download/windows) からインストール
-2. タスクトレイから Google/Microsoft/GitHub アカウントでログイン
-3. Preferences → Advanced → Hostname を `photosaver` に
-4. [Admin → DNS](https://login.tailscale.com/admin/dns) で MagicDNS + HTTPS Certificates を ON
-
-### 6. スタック起動
-```powershell
-cd immich
-docker compose up -d --build
-```
-
-### 7. Tailscale serve で HTTPS 公開
-```powershell
-tailscale serve --bg --https=443 localhost:3000
-```
-一度実行すれば再起動後も自動復元される(`--bg` で永続化)。
-
-### 8. E2E 検証
-```powershell
-node scripts/tailscale-verify.mjs
-```
-Tailscale CLI・status・serve 設定・album-guard 到達性を一括検証。
-
-## 日常運用コマンド
-
-### 起動 / 停止 / 再起動
-
-```powershell
-# 全体起動
-cd immich
+```bash
+cd /srv/photosaver
+# 1. リリースノート確認(重大な変更が告知されていないか)
+#    https://github.com/immich-app/immich/releases
+# 2. 念のため DB ダンプを先に取る(管理画面 → ジョブ → データベースダンプ作成)
+# 3. 更新
+docker compose pull
 docker compose up -d
-
-# 外部アクセスは Tailscale serve がホスト側で担うため --profile 不要
-
-# 全体停止
-docker compose down
-
-# album-guard のみ再ビルド+再起動
-docker compose up -d --build album-guard
-
-# 特定サービスの再起動
-docker compose restart album-guard
+docker compose ps    # healthy 確認
 ```
 
-### ログ確認
+- `.env` は `IMMICH_VERSION=v3` なので v3 系の範囲で安全に追従する
+- **v4 が出たら**: リリースノートと移行ガイドを読んでから `.env` を `v4` に上げる。
+  順序は「スマホアプリが先・サーバーが後」
+- **自動更新ツール(Watchtower 等)は使わない**(Watchtower は開発終了。
+  Immich のバージョン整合モデルとも相性が悪い)。更新通知だけ欲しければ
+  [GitHub リリースの Atom フィード](https://github.com/immich-app/immich/releases.atom) を購読
 
-```powershell
-# album-guard ログを追随
-docker compose logs -f album-guard
+## 容量管理
 
-# 最近 100 行
-docker compose logs --tail 100 album-guard
-
-# 全サービス
-docker compose logs -f
+```bash
+df -h /mnt/photo          # HDD 使用率
+docker system df          # Docker 側の肥大確認
 ```
 
-### ヘルスチェック
+- **使用率 80% を超えたら**: 大容量 HDD への移行を計画する(下記)
+- **満杯になると**: Immich は動作停止し、途中アップロードの一時ファイルが
+  容量を占有し続ける(コンテナ再起動で解放)。満杯にさせないことが最重要
+- 一次防衛は**ユーザーごとのクォータ**(管理 → ユーザー)。
+  クォータ合計 ≦ HDD 容量の 8 割 を維持する
 
-```powershell
-curl http://localhost:3000/album-guard/health      # album-guard
-curl http://localhost:3000/api/server/ping          # Immich(プロキシ経由)
-docker compose ps                                    # コンテナ状態一覧
+### HDD 増設・交換の手順(概要)
+
+1. 新 HDD を Btrfs でフォーマット(new-server-setup.md 手順 6 と同様)
+2. `docker compose stop` → 旧 HDD から新 HDD へ `rsync -a`
+3. fstab の UUID を差し替え、`/mnt/photo` に新 HDD をマウント
+4. マーカーファイル `touch /mnt/photo/.photosaver.mount-ok` を忘れずに
+5. `docker compose up -d` → 動作確認後、旧 HDD は退役
+
+## ユーザー管理
+
+- 追加: 管理 → ユーザー → 作成。**クォータとストレージラベルを必ず設定**
+- 削除: ユーザー削除には 7 日間の猶予期間がある(誤削除の取り消し可)
+- 友達のオンボーディング手順: [new-server-setup.md](new-server-setup.md) 手順 10
+
+## 健全性チェック(気が向いたときに)
+
+```bash
+docker compose ps                              # 全サービス healthy?
+tailscale serve status                         # 443 → 2283 転送が生きてる?
+sudo btrfs scrub status /mnt/photo             # 直近 scrub でエラー 0?
+sudo smartctl -H /dev/sda                      # HDD の SMART 健康状態
+ls -lt /srv/photosaver/db-dumps | head -3      # DB ダンプミラーが更新されてる?
 ```
 
-## Claude Code での操作
-
-Claude Code 内から以下のカスタムスキルが使える:
-
-| スキル | 用途 |
-|---|---|
-| `/drive-check` | 外付けドライブの接続・書き込み可・空き容量を検証 |
-| `/compose-up` | 全スタック起動 + ヘルスチェック |
-| `/test-auth` | E2E 認証テスト(仕様書 11.8 の T1〜T7) |
-| `/hash-password <pw>` | bcrypt ハッシュ生成 |
-| `/album-add` | アルバムパスワードを対話で登録 |
-
-また、専門サブエージェント:
-
-- `auth-reviewer` — 認証コードのセキュリティレビュー
-- `docker-debugger` — Docker / compose トラブルシュート
+scrub がエラーを報告した場合: 該当ファイルは壊れている(修復用の複製は無い)。
+管理画面のアセットから特定して削除し、HDD の SMART を確認。エラーが続くなら
+HDD 交換のサイン。
 
 ## トラブルシューティング
 
-### album-guard が起動しない
+| 症状 | 最初に見るところ |
+|---|---|
+| 友達「写真が上がらない」 | ①友達のスマホの Tailscale がオンか ②クォータ超過(管理→サーバー統計)③サーバー稼働(`docker compose ps`) |
+| ts.net URL で繋がらない | `tailscale status`、`tailscale serve status`。Machines 画面で key expiry が切れていないか |
+| mount-guard が起動を止める | `lsblk` で HDD 認識確認 → `sudo mount -a` → マーカーファイル存在確認 |
+| Web が 500/真っ白 | `docker compose logs -f immich-server`。DB unhealthy なら `docker compose logs database` |
+| ML/検索が重い・落ちる | ML はバッチ処理なので一時停止可: 管理 → ジョブ で Smart Search を一時停止 |
+| アプリ「サーバーが古い」 | 月次更新を実施(上記) |
+| 電源断のあと起動しない | BIOS の AC Recovery = Power On を再確認。fstab に `nofail` があれば HDD 障害でも OS は起動する |
 
-1. `docker compose logs album-guard` でエラー確認
-2. `ENOENT` エラー → 外付けドライブが見えていない。Docker Desktop の File Sharing を確認
-3. `EADDRINUSE` エラー → port 3000 が使用中。`immich/.env` で `GUARD_PORT=3001` 等に変更
-4. `JsonParseError` → `album-passwords.json` の JSON 文法エラー。バリデータで修正
+## 障害シナリオと復旧
 
-### Immich へのリクエストが 502
+| 障害 | 影響 | 復旧 |
+|---|---|---|
+| HDD 故障 | **写真原本は喪失**(設計上許容済み) | 新 HDD で新規構築。NVMe 上の DB ダンプで「何があったか」は確認できる |
+| NVMe 故障 | DB 喪失、写真原本は無事 | OS 再構築 → HDD 上の `backups/` 最新ダンプでリストア([migration-runbook.md](migration-runbook.md) Phase 3 と同手順)→ サムネイル再生成 |
+| ミニ PC 故障 | ハード交換まで停止 | HDD を新機体に挿してセットアップ手順を再実行。データは HDD + ダンプで復元 |
+| 誤操作で DB 破損 | メタデータ喪失リスク | 管理 → メンテナンス → 「バックアップから復元」(復元ポイント自動作成・失敗時ロールバック付き) |
 
-1. album-guard から immich-server への疎通
-   ```powershell
-   docker exec album_guard wget -qO- http://immich-server:2283/api/server/ping
-   ```
-2. NG なら immich-server のステータス確認
-3. immich-server は cold start に ~60 秒かかる場合あり(healthcheck の `start_period` で吸収)
+## 旧環境(Windows 検証環境)について
 
-### パスワード認証が通らない
-
-1. `album-passwords.json` の UUID とアルバム UUID が一致しているか(ブラウザ URL で再確認)
-2. ハッシュが正しいか(`/hash-password` で再生成して比較)
-3. ホットリロードが走ったかログで確認(`パスワード設定をロード: N アルバム`)
-4. JWT 期限切れ → クライアント側を再ログイン
-
-### 外付けドライブが抜けた / ドライブレターが変わった
-
-1. ドライブを再接続。別ドライブレターになっていれば `.env` の `PHOTO_STORAGE_PATH` と `immich/.env` の同変数を更新
-2. `docker compose restart` で再マウント
-3. 恒久対策: Windows の「ディスクの管理」でドライブレターを固定
-
-## 自動整形 / Lint (Phase B で有効化)
-
-Phase B で album-guard/package.json が作成された後、`.claude/settings.json` の
-`PostToolUse` フックに Prettier / ESLint を追加する予定。現状(Phase A)は
-`Stop` フックで `git status --short` を表示するのみ。
-
-## バックアップ
-
-### 対象
-
-- `E:\Photo\immich-library\` — 写真本体(大容量、別 HDD 推奨)
-- `E:\Photo\guard\album-passwords.json` — パスワードハッシュ(小容量、暗号化 USB 等推奨)
-- `immich/.env` — シークレット(絶対に平文で他人に渡さない)
-
-現段階では手動コピーのみ。将来 `scripts/backup.mjs` で自動化予定。
-
-## 緊急時オペレーション
-
-### 全ユーザーを強制ログアウト
-`GUARD_JWT_SECRET` を変更して album-guard を再起動:
-
-```powershell
-# 新シークレット生成
-openssl rand -hex 32
-# immich/.env の GUARD_JWT_SECRET を書き換えて保存
-cd immich
-docker compose restart album-guard
-```
-
-既存 JWT はすべて検証失敗になる → 全員再ログイン。
-
-### データ破損時
-
-- Immich DB(Docker volume): `docker volume` のバックアップから復元
-- 写真本体: 別ドライブのバックアップから復元(未バックアップ分は消失)
-- パスワード設定: バックアップがあれば復元、なければ `/album-add` で再設定
+`immich/` ディレクトリの Windows + album-guard スタックは凍結済み。
+起動したい場合のみ旧ドキュメント([legacy/](legacy/))を参照。

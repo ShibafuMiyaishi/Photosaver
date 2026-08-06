@@ -53,6 +53,10 @@ desktop.ini
 docker-compose.override.yml
 docker-compose.override.yaml
 
+# Immich official hwaccel files (downloaded on the server, not tracked)
+server/hwaccel.transcoding.yml
+server/hwaccel.ml.yml
+
 # Photo data (defense in depth — should live on external drive, never in repo)
 data/photos/
 data/immich-library/

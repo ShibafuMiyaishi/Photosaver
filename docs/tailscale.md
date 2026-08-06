@@ -1,190 +1,75 @@
-# Tailscale によるリモートアクセス
+# Tailscale リモートアクセス(Photosaver v2)
 
-HPSS / Photosaver の**外部アクセスは Tailscale で行う**。Immich 公式ドキュメントも推奨する方式で、ドメイン不要・完全無料(3 ユーザー + 100 デバイスまで)・クレジットカード不要。
+外部公開の唯一の経路。ドメイン不要・ポート開放なし・無料。
 
-## アーキテクチャ
+## 料金プランの前提(2026年8月確認)
 
-```
-[スマホ / PC (Tailscale client)]
-         ↓ Tailscale の WireGuard メッシュ VPN
-[家の Windows PC(Tailscale installed)]
-         ↓ tailscale serve — HTTPS 終端 + localhost:3000 へ転送
-[Docker: album-guard :3000]
-         ↓ HTTP passthrough
-[Docker: immich-server :2283]
-         ↓ bind mount
-[外付けドライブ E:\Photo]
-```
+- **Personal(無料)プラン: 6 ユーザーまで、ユーザー所有デバイス数は無制限**
+  (2026年4月8日の [公式プラン改定](https://tailscale.com/blog/pricing-v4) で拡張された)
+- **node sharing(マシン共有)は無料枠を消費しない**: 友達を tailnet の
+  「ユーザー」として招待すると 6 人枠を使うが、photosaver マシンだけを
+  共有する分には人数制限なし・双方無料
+  ([sharing](https://tailscale.com/kb/1084/sharing) /
+  [inviting vs sharing](https://tailscale.com/docs/reference/inviting-vs-sharing))
+- 使い分け: **家族(全マシンにアクセスさせたい人)= ユーザー招待、友達 = node sharing**
 
-**アクセス URL の形**: `https://<hostname>.<tailnet-name>.ts.net`
-(例: `https://photosaver.tail12345.ts.net`)
+## サーバー側の設定
 
-**到達可能な端末**:
-- あなた自身の Tailscale 認証済の PC・スマホ
-- あなたが tailnet に招待した家族・友人の端末(Tailscale インストール + ログイン必須)
+セットアップ手順は [new-server-setup.md](new-server-setup.md) 手順 7。要点:
 
-Tailscale 未インストール端末からは**URL も IP も見えず、到達不能**(パブリック URL ではないため)。
-
----
-
-## セットアップ手順
-
-### Stage 1: Tailscale アカウント + Windows クライアント(5 分)
-
-1. [https://tailscale.com/download/windows](https://tailscale.com/download/windows) にアクセス → Windows 版ダウンロード
-2. インストーラーを実行
-3. 初回起動 → ブラウザで Google / GitHub / Microsoft アカウントでログイン
-4. タスクトレイに Tailscale アイコン(✓)が表示されれば接続完了
-5. 右クリック → **Admin console** を開いて自分の tailnet が作成されたことを確認
-
-**無料プラン制限**:
-- 3 ユーザー + 100 デバイス
-- ユーザー招待は device sharing で回避可(device 共有は無制限)
-
-### Stage 2: ホスト名を設定して Tailnet に album-guard ホストを登録(2 分)
-
-1. Tailscale タスクトレイ → **Preferences** → **Advanced**
-2. Hostname を `photosaver`(任意)に変更 → 再接続
-3. Tailscale Admin Console ([https://login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines))で `photosaver` が一覧に表示されることを確認
-4. Tailscale が払い出した IP(`100.x.x.x` の形)をメモ
-
-### Stage 3: MagicDNS 有効化(1 分)
-
-1. [Tailscale Admin → DNS](https://login.tailscale.com/admin/dns)
-2. **MagicDNS** を **ON**
-3. **HTTPS Certificates** を **Enable**(`tailscale serve --https` で自動 TLS を取得するのに必要)
-4. tailnet 名(例: `tail12345.ts.net`)が表示される。これは削除せずそのまま使う(名前変更も可能だが URL も変わるので注意)
-
-### Stage 4: Docker スタック起動(1 分)
-
-`tailscale serve` の前提として album-guard が動いている必要があるので先に起動。
-
-```powershell
-cd C:\Users\fumiy\Desktop\code\Photosaver\immich
-docker compose up -d --build
+```bash
+sudo tailscale up
+sudo tailscale serve --bg --https=443 http://127.0.0.1:2283
 ```
 
-全サービス `healthy` 確認:
-```powershell
-docker compose ps
-curl http://localhost:3000/album-guard/health
-```
+- `--bg` の設定は**再起動後も永続**([公式](https://tailscale.com/kb/1242/tailscale-serve))
+- 証明書は ts.net ドメインの**正規 Let's Encrypt 証明書**。スマホアプリからも
+  警告なしで使える(管理画面で MagicDNS + HTTPS Certificates の有効化が前提)
+- 管理画面 → Machines → photosaver の **Key expiry を Disable** にしておく
+  (キー期限切れによる突然の接続断を防ぐ)
 
-### Stage 5: Tailscale serve で HTTPS 公開(30 秒)
+## 友達の招待(node sharing)
 
-PowerShell を管理者権限で開き:
+1. [Machines](https://login.tailscale.com/admin/machines) → photosaver → **Share...** →
+   招待リンクを発行して送る
+2. 友達は Tailscale アカウント(無料)を作って承認するだけ。
+   photosaver マシンだけが友達の Tailscale アプリに現れる
+3. **URL は必ずフル FQDN**(`https://photosaver.<tailnet名>.ts.net`)を案内する。
+   共有された側は短縮名では解決できない
+4. おまけ: 共有が成立すると双方のデバイス上限が +2 される
 
-```powershell
-tailscale serve --bg --https=443 localhost:3000
-```
+こちらの tailnet の他のマシンは友達から見えない(共有したノードのみ)。
+ACL でさらに絞ることも可能だがデフォルトで十分。
 
-フラグ:
-- `--bg` — 永続化(再起動後も自動復元)
-- `--https=443` — Tailscale ネットワーク上の 443 番ポートで HTTPS 終端
-- `localhost:3000` — 転送先(album-guard)
+## 既知の制約(友達に伝える期待値)
 
-確認:
-```powershell
-tailscale serve status
-```
+- スマホの**バックグラウンド自動バックアップはベストエフォート**:
+  - iOS: OS の制約でアプリを開いた時にまとめて追いつく挙動になりがち
+    (Background App Refresh オン + 低電力モードオフで改善)
+  - Android: 一部端末で Tailscale 併用時にアップロードが止まる既知の不具合あり
+    ([tailscale/tailscale#17982](https://github.com/tailscale/tailscale/issues/17982)、
+    2026年8月時点で未解決)。「アプリを開けば上がる」が回避策
+- Tailscale の VPN をオフにするとサーバーに繋がらない。
+  「写真が上がらない」の 9 割はこれ
+- 電池消費は実用上ほぼ気にならない(WireGuard はアイドルが軽い)
 
-出力例:
-```
-https://photosaver.tail12345.ts.net (tailnet only)
-|-- / proxy http://localhost:3000
-```
+## 将来の拡張: アプリを入れない人への共有
 
-### Stage 6: 動作確認(1 分)
+「URL を送るだけで見せたい」需要が出たら、**Immich Public Proxy (IPP)** +
+**Tailscale Funnel** を追加する(Immich 本体は非公開のまま、読み取り専用の
+IPP だけを公開する定石構成):
 
-1. スマホ([iOS](https://apps.apple.com/app/tailscale/id1470499037) / [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn))に Tailscale アプリをインストール
-2. 同じアカウントでログイン → tailnet に参加
-3. モバイルブラウザで `https://photosaver.tail12345.ts.net` を開く
-4. Immich Web UI が表示されれば完了
-5. 保護アルバムを開くとパスワード入力画面に遷移(album-guard の認証が効く)
-
-**ポイント**: スマホが自宅 WiFi でも外出先の 4G/5G でも同じ URL で到達可能。Tailscale が家-外の VPN を自動構築する。
-
-### Stage 7: 検証スクリプト
-
-```powershell
-node scripts/tailscale-verify.mjs
-```
-
-tailscale コマンドで tunnel 状態、serve config、album-guard への到達性を自動チェック。
-
----
-
-## 家族・友人を招待する
-
-### パターン A: ユーザー招待(tailnet の正メンバーに加える)
-
-1. Admin Console → [Users](https://login.tailscale.com/admin/users) → **Invite users**
-2. 招待したい相手のメールアドレスを入力
-3. 相手がメールのリンクから参加 → Tailscale インストール → 自動的に tailnet に参加
-
-**無料枠**: 自分を含めて 3 ユーザーまで。超過は Personal Plus プラン(6 ユーザー $5/月)へ。
-
-### パターン B: Device Sharing(ユーザー枠を消費しない)
-
-1. Admin Console → [Machines](https://login.tailscale.com/admin/machines) → `photosaver`
-2. **Share node** → 相手のメールアドレスを入力
-3. 相手が Tailscale に登録済なら即共有、未登録なら登録後に参加
-
-**ユーザー枠を消費せず**、特定のマシン(Photosaver)だけ共有できる。家族 4〜6 人とも無料枠内で共有可。
-
----
-
-## セキュリティモデル
-
-- **Tailscale レイヤ**: WireGuard ベースの E2E 暗号化。Tailscale Admin で認証した端末のみ接続可
-- **album-guard レイヤ**: 保護アルバム UUID への JWT + bcrypt 認証
-- **Immich レイヤ**: Immich 本体の user/password 認証
-
-**3 層防御**。Tailscale に招待した家族でも、album-guard で守った「家族プライベート」アルバムは更にパスワード必須という二重守り可能。
-
----
+- [IPP](https://github.com/alangrainger/immich-public-proxy) は Immich の共有リンク
+  (パスワード・期限付き)だけを外に出すステートレスなプロキシ。API キー不要
+- [Funnel](https://tailscale.com/kb/1223/funnel) は全プランで利用可。
+  帯域制限あり(非公開値)のため単発のリンク共有向け
+- 現構成への追加はコンテナ 1 つ + `tailscale funnel` 1 コマンドで、既存部分の変更は不要
 
 ## トラブルシューティング
 
-### `tailscale serve` が `certificate` エラーを返す
-
-Stage 3 の **HTTPS Certificates** を有効化していない。Admin → DNS で ON にしてから serve 再実行。
-
-### スマホアプリで `https://photosaver.xxx.ts.net` に繋がらない
-
-- スマホの Tailscale アプリが ON になっているか確認
-- 別の VPN アプリが干渉していないか(Tailscale と競合する場合あり)
-- `ping photosaver` で IP に到達するか確認(アプリの machines 画面で `photosaver` を tap)
-
-### 家族のスマホから album-guard のパスワード入力画面が出ない
-
-album-guard の認証は Immich 標準の `/albums/<uuid>` ではなく API レベルで効く。現実装(Phase B)ではブラウザ UI で直接 401 が出る場合あり。Phase 11.5 で HTML 自動注入により改善予定(`docs/phase-11.5-design.md`)。
-
-暫定: 保護アルバムは `https://photosaver.xxx.ts.net/album-guard/login?albumId=<UUID>` を直接開き、認証後に Immich の該当アルバム URL に戻る。
-
-### album-guard のヘルスが赤(`docker compose ps` で unhealthy)
-
-Tailscale とは無関係。`docker compose logs album-guard --tail 50` で原因調査。`.claude/agents/docker-debugger` で診断可。
-
----
-
-## `tailscale funnel` を使うと(参考)
-
-**Funnel** は tailnet 外(完全なパブリック)への露出。今回は使わない(Tailscale 非インストール端末からも見られてしまうため)。
-
-もし将来「ブラウザだけで開ける公開リンク」が必要になったら、以下のように `funnel` を代替:
-```powershell
-tailscale funnel --bg 443 localhost:3000
-```
-
-ただし album-guard の認証のみが唯一の関門になるため、`GUARD_JWT_SECRET` 強度と album-passwords.json 管理が極めて重要になる。**本プロジェクトでは `tailscale serve`(tailnet only)推奨**。
-
----
-
-## 関連スクリプト
-
-| スクリプト | 用途 |
+| 症状 | 確認 |
 |---|---|
-| `scripts/tailscale-verify.mjs` | tailscale CLI が利用可か + serve config + album-guard 到達性の統合検証 |
-
-設定は基本ワンタイム(`tailscale serve --bg` は永続)。tailnet メンバー管理は Tailscale Admin Console で実施。
+| 全員繋がらない | サーバーで `tailscale status`(logged out になっていないか)、`tailscale serve status` |
+| 特定の友達だけ繋がらない | 友達側の VPN オン確認 → 共有の承認状態(Machines → Shared with) → フル FQDN を使っているか |
+| 証明書エラー | 管理画面で HTTPS Certificates が有効か。`tailscale serve` を一度リセット(`sudo tailscale serve reset` → 再設定) |
+| 速度が遅い | `tailscale status` で相手との接続が direct か relay(DERP)か確認。relay ならルーターの NAT 設定(UPnP)を見直す |
