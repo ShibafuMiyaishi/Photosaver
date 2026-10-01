@@ -50,7 +50,16 @@ services:
       MAX_FILE_GB: ${MAX_FILE_GB:-4}
       MIN_FREE_GB: ${MIN_FREE_GB:-10}
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
+      MOUNT_MARKER: /run/photosaver/mount-ok
     volumes:
+      # HDD mount marker (exists only on the mounted HDD). Startup fails if it is missing,
+      # and the app re-checks it before accepting each upload.
+      - type: bind
+        source: ${MOUNT_MARKER_HOST:-/mnt/photo/.photosaver.mount-ok}
+        target: /run/photosaver/mount-ok
+        read_only: true
+        bind:
+          create_host_path: false
       # Photo HDD. create_host_path: false makes startup fail (instead of writing to the
       # system disk) when the HDD is not mounted and the directory does not exist.
       - type: bind

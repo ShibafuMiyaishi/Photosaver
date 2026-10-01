@@ -1,9 +1,11 @@
 // guest-gateway/test/app.test.js
 // 実アプリを起動し、HTTP と tus(tus-js-client の Node 版)で受入条件を確認する。
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import * as tus from 'tus-js-client';
-import { login, startServer } from './helpers/server.js';
+import { login, startServer, TMP_ROOT } from './helpers/server.js';
 
 // 1x1 transparent PNG.
 const PNG = Buffer.from(
@@ -78,10 +80,17 @@ describe('open gateway', () => {
     expect(res.status).toBe(400);
   });
 
-  it('rate-limits repeated wrong passwords', async () => {
-    let last;
-    for (let i = 0; i < 11; i += 1) last = await login(srv.baseUrl, `wrong-${i}`);
-    expect(last.res.status).toBe(429);
+  it('locks out an address after 5 wrong passwords, even for the right one', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      expect((await login(srv.baseUrl, `wrong-${i}`)).res.status).toBe(401);
+    }
+    const sixth = await login(srv.baseUrl, 'wrong-5');
+    expect(sixth.res.status).toBe(429);
+    expect(await sixth.res.json()).toEqual({ error: 'too_many_attempts' });
+    expect(sixth.res.headers.get('retry-after')).toBe('900');
+    const correct = await login(srv.baseUrl);
+    expect(correct.res.status).toBe(429);
+    expect(correct.cookie).toBe('');
   });
 
   it('refuses uploads without a session', async () => {
@@ -119,6 +128,71 @@ describe('open gateway', () => {
     const { cookie } = await login(srv.baseUrl);
     const res = await fetch(`${srv.baseUrl}/api/whoami`, { headers: { Cookie: cookie } });
     expect(await res.json()).toMatchObject({ viaFunnel: false });
+  });
+});
+
+describe('upload storage safety', () => {
+  let srv;
+  afterEach(async () => {
+    await srv?.close();
+    srv = undefined;
+  });
+
+  it('refuses uploads with 503 when the HDD mount marker is missing', async () => {
+    srv = await startServer({ mountMarker: path.join(TMP_ROOT, 'missing.mount-ok') });
+    const { cookie } = await login(srv.baseUrl);
+    const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0001.png');
+    expect(result).toEqual({ ok: false, status: 503 });
+  });
+
+  it('accepts uploads when the HDD mount marker exists', async () => {
+    const marker = path.join(TMP_ROOT, `${crypto.randomUUID()}.mount-ok`);
+    await fs.mkdir(TMP_ROOT, { recursive: true });
+    await fs.writeFile(marker, '');
+    try {
+      srv = await startServer({ mountMarker: marker });
+      const { cookie } = await login(srv.baseUrl);
+      const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0001.png');
+      expect(result).toEqual({ ok: true, detected: 'image/png' });
+    } finally {
+      await fs.rm(marker, { force: true });
+    }
+  });
+
+  it('does not leak internal error details to the client', async () => {
+    srv = await startServer();
+    const { cookie } = await login(srv.baseUrl);
+    // Make fs.statfs fail inside the creation hook.
+    await fs.rm(srv.stagingDir, { recursive: true, force: true });
+    const res = await fetch(`${srv.baseUrl}/files/`, {
+      method: 'POST',
+      headers: {
+        ...CSRF,
+        Cookie: cookie,
+        'Tus-Resumable': '1.0.0',
+        'Upload-Length': String(PNG.length),
+        'Upload-Metadata': `filename ${Buffer.from('a.png').toString('base64')}`,
+      },
+    });
+    expect(res.status).toBe(503);
+    const body = await res.text();
+    expect(body).toContain('Storage unavailable');
+    expect(body).not.toContain(srv.stagingDir);
+    expect(body).not.toMatch(/ENOENT/);
+  });
+
+  it('keeps finished files outside the tus area when KEEP_UPLOADS is on', async () => {
+    srv = await startServer({ keepUploads: true });
+    const { cookie } = await login(srv.baseUrl);
+    const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0001.PNG');
+    expect(result).toEqual({ ok: true, detected: 'image/png' });
+    expect(await fs.readdir(srv.stagingDir)).toEqual(['kept']);
+    const kept = await fs.readdir(path.join(srv.stagingDir, 'kept'));
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatch(/^[A-Za-z0-9_-]+\.png$/);
+    // Expiry cleanup only sees tus entries (file + .json), so the kept file survives.
+    await srv.tusServer.cleanUpExpiredUploads();
+    expect(await fs.readdir(path.join(srv.stagingDir, 'kept'))).toEqual(kept);
   });
 });
 

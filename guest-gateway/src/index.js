@@ -1,11 +1,11 @@
 // guest-gateway/src/index.js
-// 起動エントリ。設定検証 → ステージング先の確認 → HTTP 待ち受け → 定期処理(期限切れの掃除)。
+// 起動エントリ。設定検証 → HDD マーカー・ステージング先の確認 → HTTP 待ち受け → 定期処理(期限切れの掃除)。
 
 import fs from 'node:fs/promises';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { log } from './log.js';
-import { purgeStaging } from './uploads.js';
+import { mountMarkerPresent, purgeStaging } from './uploads.js';
 
 const CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 const CLOSE_CHECK_INTERVAL_MS = 60 * 1000;
@@ -15,6 +15,12 @@ try {
   config = loadConfig();
 } catch (err) {
   log('error', 'config_invalid', { error: err.message });
+  process.exit(1);
+}
+
+// The marker file only exists on the mounted photo HDD (see docs/new-server-setup.md).
+if (!(await mountMarkerPresent(config.mountMarker))) {
+  log('error', 'mount_marker_missing', { marker: config.mountMarker });
   process.exit(1);
 }
 

@@ -1,6 +1,8 @@
 // guest-gateway/scripts/hash-password.js
 // 合言葉の scrypt ハッシュを生成して標準出力に出す(.env の GUEST_PASSWORD_HASH 用)。
-// 合言葉はシェル履歴に残らないよう標準入力から読む:
+// 合言葉はシェル履歴に残らないよう標準入力から読む。ミニPC(Node なし)ではイメージ経由で実行:
+//   read -rs P && printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js; unset P
+// ローカル開発(Mac)なら:
 //   read -rs P && printf '%s' "$P" | npm run -s hash-password; unset P
 
 import { hashPassword } from '../src/auth.js';

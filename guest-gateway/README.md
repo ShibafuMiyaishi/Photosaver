@@ -47,14 +47,22 @@ COOKIE_SECURE=false MIN_FREE_GB=1 npm start
 # 1. コードを更新
 git -C /srv/photosaver/repo pull
 
-# 2. ディレクトリ(ステージングは写真 HDD 上。HDD 未マウント時は作らないこと)
-findmnt /mnt/photo
-mkdir -p /srv/photosaver/guest-gateway /mnt/photo/guest-gateway/staging
-sudo chown 1000:1000 /mnt/photo/guest-gateway/staging   # コンテナは uid 1000 (node) で動く
+# 2. ディレクトリ(ステージングは写真 HDD 上)
+#    HDD が外れていると /mnt/photo は空のシステムディスク上のディレクトリになり、mkdir すると
+#    そこに書き込まれてしまう。HDD 上にだけあるマーカーで確認してから作る
+#    ('HDD not mounted' と出たらここで中止し、HDD のマウントを先に直す)
+if test -f /mnt/photo/.photosaver.mount-ok; then
+  mkdir -p /srv/photosaver/guest-gateway /mnt/photo/guest-gateway/staging
+  sudo chown 1000:1000 /mnt/photo/guest-gateway/staging   # コンテナは uid 1000 (node) で動く
+else
+  echo 'HDD not mounted'
+fi
+#    窓口コンテナにもこのマーカーを読み取り専用で渡す(無ければ起動しない・受付も止める)
 
 # 3. .env を作る(権限 600。値は表示・コミットしない)
 install -m 600 /srv/photosaver/repo/guest-gateway/.env.example /srv/photosaver/guest-gateway/.env
 #    TS_AUTHKEY / SESSION_SECRET / GUEST_PASSWORD_HASH / CLOSES_AT を埋める
+#    (MOUNT_MARKER_HOST は上のマーカーのパス。既定値のままでよい)
 openssl rand -hex 32                                         # → SESSION_SECRET
 docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
 read -rs P && printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js; unset P
@@ -74,8 +82,10 @@ docker compose -p wedding-gw logs -f guest-gateway     # 計測ログ(upload_fin
 
 - `upload_finished` ログの `size` / `elapsedMs` / `mbps` / `detectedType`(iPhone の HEIC/JPEG・動画形式の確認)
 - 画面の「計測情報」: サーバーから見える接続元 IP と、Funnel 経由かどうか
-- iPhone の形式確認でファイル自体を残したい場合だけ、`.env` を `KEEP_UPLOADS=true` にして再起動
-  (確認後は false に戻し、ステージング内を削除する)
+- iPhone の形式確認でファイル自体を残したい場合だけ、`.env` を `KEEP_UPLOADS=true` にして再起動。
+  受信済みファイルは `/mnt/photo/guest-gateway/staging/kept/<id>.<拡張子>` に移され、
+  期限切れ掃除の対象外になる(受付期限 `CLOSES_AT` を過ぎた時点のステージング一括削除で消える)。
+  確認後は false に戻し、`kept/` を削除する
 
 ### 停止
 

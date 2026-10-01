@@ -28,7 +28,7 @@ export async function startServer(overrides = {}) {
     }),
     ...overrides,
   };
-  const { app } = createApp(config);
+  const { app, tusServer } = createApp(config);
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -37,6 +37,7 @@ export async function startServer(overrides = {}) {
     baseUrl,
     stagingDir,
     config,
+    tusServer,
     async close() {
       await new Promise((resolve) => server.close(resolve));
       await fs.rm(stagingDir, { recursive: true, force: true });

@@ -8,6 +8,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import { newDeviceId, signSession, verifyPassword, verifySession } from './auth.js';
+import { createLockout } from './lockout.js';
 import { log } from './log.js';
 import { createTusServer } from './uploads.js';
 
@@ -55,6 +56,7 @@ function shortHash(value) {
 export function createApp(config) {
   const app = express();
   const tusServer = createTusServer(config);
+  const lockout = createLockout();
   const isClosed = () => Date.now() >= config.closesAt;
 
   app.set('trust proxy', config.trustProxyHops);
@@ -126,10 +128,10 @@ export function createApp(config) {
     return next();
   };
 
+  // Coarse outer cap on every login request; the real brute-force control is `lockout`.
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 10,
-    skipSuccessfulRequests: true,
+    limit: 30,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     handler: (req, res) => {
@@ -138,19 +140,31 @@ export function createApp(config) {
     },
   });
 
+  // Runs before the body parser and scrypt so locked clients cost almost nothing.
+  const lockoutGuard = (req, res, next) => {
+    const { allowed, retryAfterMs } = lockout.check(req.ip);
+    if (allowed) return next();
+    res.set('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+    return res.status(429).json({ error: 'too_many_attempts' });
+  };
+
   app.get('/api/session', (req, res) => {
     res.json({ authenticated: Boolean(req.gwSession), closesAt: new Date(config.closesAt) });
   });
 
-  app.post('/api/login', loginLimiter, express.json({ limit: '1kb' }), async (req, res) => {
+  const parseLoginBody = express.json({ limit: '1kb' });
+
+  app.post('/api/login', loginLimiter, lockoutGuard, parseLoginBody, async (req, res) => {
     const password = req.body?.password;
     if (typeof password !== 'string' || password.length === 0 || password.length > 256) {
       return res.status(400).json({ error: 'bad_request' });
     }
     if (!(await verifyPassword(password, config.guestPasswordHash))) {
       log('warn', 'login_failed', { ip: req.ip });
+      lockout.recordFailure(req.ip);
       return res.status(401).json({ error: 'wrong_password' });
     }
+    lockout.recordSuccess(req.ip);
     const session = { deviceId: newDeviceId(), role: 'guest', exp: config.closesAt };
     res.cookie(cookieName(config), signSession(session, config.sessionSecret), {
       httpOnly: true,

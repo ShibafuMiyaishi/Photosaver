@@ -97,11 +97,29 @@ function updateItem(item, text) {
 function updateSummary() {
   const done = items.filter((i) => i.status === 'done').length;
   const failed = items.filter((i) => i.status === 'error').length;
+  const rejected = items.filter((i) => i.status === 'rejected').length;
   $('summary').textContent =
-    `完了 ${done} / ${items.length} 件` + (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '');
+    `完了 ${done} / ${items.length} 件` +
+    (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '') +
+    (rejected ? `(受付不可 ${rejected} 件)` : '');
 }
 
 // --- Upload ---
+
+// Failures that re-sending the same file cannot fix (refused by the server).
+// 401 → re-login, 409/423 → offset/lock conflicts, 5xx/network → transient: all retryable.
+function isPermanentFailure(status) {
+  if (status === 507) return true;
+  if (!status || status < 400 || status >= 500) return false;
+  return ![401, 409, 423].includes(status);
+}
+
+function rejectedText(status) {
+  if (status === 507) return '受付不可(507)— サーバーの保存容量が不足しています';
+  if (status === 413) return '受付不可(413)— ファイルが大きすぎます';
+  if (status === 415) return '受付不可(415)— 対応していない形式のファイルです';
+  return `受付不可(${status})— このファイルはサーバーに受け付けられませんでした`;
+}
 
 function speedText(item, bytesSent) {
   const elapsed = performance.now() - item.startedAt;
@@ -141,11 +159,21 @@ function createUpload(item) {
     },
     onError(err) {
       const status = err.originalResponse?.getStatus?.();
+      if (status === 410) {
+        document.body.textContent = 'このアップロード窓口は受付を終了しました。';
+        releaseWakeLock();
+        return;
+      }
       if (status === 401) {
         show('login');
       }
-      item.status = 'error';
-      updateItem(item, `失敗(${status ?? '通信エラー'})— 画面に戻ると自動で再開します`);
+      if (isPermanentFailure(status)) {
+        item.status = 'rejected';
+        updateItem(item, rejectedText(status));
+      } else {
+        item.status = 'error';
+        updateItem(item, `失敗(${status ?? '通信エラー'})— 画面に戻ると自動で再開します`);
+      }
       finish();
     },
   });

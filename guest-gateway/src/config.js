@@ -35,7 +35,7 @@ export function loadConfig(env = process.env) {
 
   const guestPasswordHash = env.GUEST_PASSWORD_HASH ?? '';
   if (!guestPasswordHash.startsWith('scrypt:')) {
-    throw fail('GUEST_PASSWORD_HASH is missing or not a scrypt hash (npm run hash-password)');
+    throw fail('GUEST_PASSWORD_HASH is missing or not a scrypt hash (scripts/hash-password.js)');
   }
 
   const closesAt = Date.parse(env.CLOSES_AT ?? '');
@@ -55,6 +55,8 @@ export function loadConfig(env = process.env) {
     guestPasswordHash,
     closesAt,
     stagingDir,
+    // Container path of the HDD mount marker file; empty disables the check (local dev/tests).
+    mountMarker: env.MOUNT_MARKER ?? '',
     maxFileBytes: parsePositiveNumber('MAX_FILE_GB', env.MAX_FILE_GB, 4) * GIB,
     minFreeBytes: parsePositiveNumber('MIN_FREE_GB', env.MIN_FREE_GB, 10) * GIB,
     keepUploads: parseBool(env.KEEP_UPLOADS, false),
