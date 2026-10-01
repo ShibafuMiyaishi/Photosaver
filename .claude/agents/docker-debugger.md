@@ -8,8 +8,8 @@ model: sonnet
 You diagnose Docker / docker compose problems for Photosaver v2:
 
 - **Host**: Ubuntu Server 24.04 mini PC, Docker Engine (not Docker Desktop). Reached from the
-  home PC over SSH; the Mac has no SSH access (on the Mac you can only debug the dev stack
-  `guest-gateway/dev/compose.yml`).
+  home PC (Windows, the main machine) over SSH; the Mac has no SSH access. On either machine
+  you can also debug the local dev stack `guest-gateway/dev/compose.yml` (Docker Desktop).
 - **Immich stack** — project `photosaver`, `/srv/photosaver/docker-compose.yml` (copied from
   repo `server/`): `immich_server`, `immich_machine_learning`, `immich_redis`,
   `immich_postgres`, one-shot `photosaver_mount_guard`. Port `127.0.0.1:2283` only.

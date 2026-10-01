@@ -92,20 +92,23 @@ unless the user explicitly changes this policy.
 - **Testing / temp files** → `.claude/rules/testing.md`: all ephemeral output under
   repo-relative `tmp/` (gitignored). guest-gateway: `npm test` / `npm run lint` in
   `guest-gateway/`; the Immich integration tests run only with `IMMICH_IT_*` env set
-  against the dev Immich (`guest-gateway/dev/compose.yml`, Mac only).
+  against the dev Immich (`guest-gateway/dev/compose.yml`, on a dev machine — never the mini PC).
 - **Language**: Claude-facing files (this file, `.claude/**`) in English.
   Human-facing files (`README.md`, `docs/`, UI text) in Japanese.
   Code comments default to English; Japanese for domain-specific context.
 
-## Two machines (Mac ⇄ home PC)
+## Two machines (home PC ⇄ Mac)
 
-- **Mac (work laptop)**: development only — code, local Docker/dev Immich, tests, docs.
-  No SSH to the mini PC, no tailnet, no server secrets.
-- **Home PC**: can SSH to the mini PC on the same LAN — deploys, ops, measurements,
-  guiding the user through the Tailscale admin console.
-- They hand work over through git: **`.claude/handoff/`** (protocol in its README, open
-  tasks in `tasks.md`, results in `reports/`). On the home PC, `git pull` and read
-  `.claude/handoff/tasks.md` when the user asks to continue server-side work.
+- **Home PC (Windows) — the main machine**: most development happens here (Docker Desktop
+  for the dev Immich; shell commands in the docs are bash, i.e. Git Bash on Windows), and it
+  is the only machine that can SSH to the mini PC on the same LAN — deploys, ops,
+  measurements, guiding the user through the Tailscale admin console.
+- **Mac (work laptop)**: used only while the user is travelling. Development only — code,
+  local Docker/dev Immich, tests, docs. No SSH to the mini PC, no tailnet, no server secrets.
+  Keep Windows-specific config (e.g. paths in `.claude/mcp.json`) as is; it is for the home PC.
+- Server-side work prepared on the Mac is handed over through git: **`.claude/handoff/`**
+  (protocol in its README, open tasks in `tasks.md`, results in `reports/`). On the home PC,
+  `git pull` and read `.claude/handoff/tasks.md` when the user asks to continue server-side work.
 - **This repo is public** — never commit tailnet names, `*.ts.net` hostnames, IPs, keys,
   policy files, or personal info about events/guests.
 

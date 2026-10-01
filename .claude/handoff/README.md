@@ -1,15 +1,18 @@
 # Cross-machine handoff (Mac ⇄ home PC)
 
-The user works on this repo from two machines with different capabilities. Git is the only
-channel between them.
+The user works on this repo from two machines. Git is the only channel between them.
 
 | Machine | Can do | Cannot do |
 |---|---|---|
-| **Mac** (work laptop, macOS) | Write code, run local Docker (incl. a local dev Immich), tests, docs, commit/push | SSH to the mini PC, join the tailnet, hold server secrets |
-| **Home PC** | SSH to the mini PC (same LAN), run ops/deploy commands, help the user with the Tailscale admin console, measure | — (normal dev work is fine too) |
+| **Home PC** (Windows, the main machine) | Everything: development (Docker Desktop, dev Immich, tests), SSH to the mini PC (same LAN), ops/deploy commands, helping the user with the Tailscale admin console, measurements | — |
+| **Mac** (work laptop, macOS; used only while the user travels) | Write code, run local Docker (incl. a local dev Immich), tests, docs, commit/push | SSH to the mini PC, join the tailnet, hold server secrets |
 
-How to tell where you are: if `ssh` to the mini PC works (or the user says you are on the home PC),
-you are the home PC. On macOS under `/Users/fumiyaishibashi/` you are the Mac.
+How to tell where you are: on Windows (or if `ssh` to the mini PC works, or the user says so) you
+are the home PC. On macOS under `/Users/fumiyaishibashi/` you are the Mac.
+
+This handoff is needed only for server-side work prepared on the Mac. When the user is on the
+home PC, development and server work happen in the same place: do the work directly (still ask
+before anything needing approval) and update `tasks.md` / `reports/` so the history stays complete.
 
 ## Protocol
 
@@ -21,8 +24,9 @@ you are the home PC. On macOS under `/Users/fumiyaishibashi/` you are the Mac.
    (template below; create `reports/` on the first report), set the task's status in `tasks.md` to `DONE` / `BLOCKED`, commit, push.
 4. **Mac**: `git pull`, read the reports, continue development, update `tasks.md`.
 
-Only the Mac edits task *definitions*; the home PC only changes the `Status:` line and writes
-reports. This avoids merge conflicts. Always `git pull --rebase` before pushing.
+While both machines are in use, only the machine doing the development (the Mac while the user
+travels) edits task *definitions*; the other only changes `Status:` lines and writes reports.
+This avoids merge conflicts. Always `git pull --rebase` before pushing.
 
 ## ⚠️ This repository is PUBLIC
 

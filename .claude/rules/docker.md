@@ -9,7 +9,7 @@ paths: "**/Dockerfile, **/docker-compose*.yml, **/docker-compose*.yaml, **/compo
 |---|---|---|
 | `server/docker-compose.yml` | ACTIVE (mini PC, project `photosaver`) | Official Immich compose + 5 numbered deltas (see `CLAUDE.md`) |
 | `guest-gateway/compose.yml` | ACTIVE (mini PC, project `wedding-gw`) | Tailscale sidecar + gateway; joins external network `photosaver_gw` |
-| `guest-gateway/dev/compose.yml` | dev only (Mac) | Pinned dev Immich for integration tests; never deploy it |
+| `guest-gateway/dev/compose.yml` | dev only (home PC / Mac, Docker Desktop) | Pinned dev Immich for integration tests; never deploy it |
 | `immich/docker-compose.yml` | FROZEN | Old Windows validation stack (Immich + album-guard) |
 
 ## Base images
@@ -81,5 +81,5 @@ Never recommend:
 - `docker system prune -a` (destroys other projects' data)
 - `docker volume rm` without a backup path
 - `docker compose down -v` without confirming the user accepts data loss
-  (the dev Immich `down -v` reset is fine on the Mac, with the warning)
+  (the dev Immich `down -v` reset is fine on a dev machine, with the warning)
 - `tailscale funnel reset` / `tailscale serve reset` on the mini PC host
