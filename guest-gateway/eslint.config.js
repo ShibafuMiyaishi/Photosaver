@@ -32,6 +32,8 @@ const browserGlobals = {
   localStorage: 'readonly',
   encodeURIComponent: 'readonly',
   File: 'readonly',
+  IntersectionObserver: 'readonly',
+  HTMLImageElement: 'readonly',
 };
 
 const vitestGlobals = {

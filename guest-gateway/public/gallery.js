@@ -2,20 +2,30 @@
 // 「みんなの写真」: アルバム全体のサムネイル一覧 → PhotoSwipe で拡大・スワイプ・動画再生 → 保存。
 // 保存は写真なら原寸を取得してから共有シート(写真アプリへ保存)、動画や非対応端末は直接ダウンロード。
 // 原寸の先読みはしない(ゲスト全員が見るだけで数 GB になるため)。1 回目のタップで準備、2 回目で保存。
+// サムネイルは画面に近いものから同時 12 件までに絞って読み込む(窓口の同時配信上限 48 より十分下)。
+// 動画は表示中のスライドだけが通信する(窓口の動画・原寸の上限は端末あたり 4 本)。
 
 import PhotoSwipeLightbox from '/vendor/photoswipe/photoswipe-lightbox.esm.min.js';
 
-// Retries for thumbnails that are not ready yet (404 while Immich generates them) or busy (429).
-const THUMB_RETRY_MS = [2000, 5000, 15000, 30000, 60000];
+// Thumbnails in flight at once; well below the gateway's 48 per device, so 429s are rare and
+// failures are mostly "not generated yet" (404 right after an upload).
+const THUMB_CONCURRENCY = 12;
+// Retry delays (with jitter) for failed thumbnails; generation can take a while under load.
+const THUMB_RETRY_MS = [2000, 4000, 8000, 15000, 30000, 60000, 60000, 60000];
+// Start loading thumbnails a little before they scroll into view.
+const THUMB_ROOT_MARGIN = '600px 0px';
 const REFRESH_AFTER_MS = 30_000;
 
 const $ = (id) => document.getElementById(id);
 
 let assets = [];
+// Signature of the rendered list: skip rebuilding thousands of tiles when nothing changed.
+let renderedSignature = '';
 let lightbox = null;
 let loadedAt = 0;
 let loading = null;
-// Prepared originals for the share sheet: assetId → File (only the photo being saved).
+let onUnauthorized = () => {};
+// Prepared original for the share sheet: assetId → File (only the photo being saved).
 const prepared = new Map();
 
 function mediaUrl(asset, kind) {
@@ -45,20 +55,84 @@ function canShareFiles() {
   }
 }
 
-// --- Thumbnails ---
+// --- Thumbnails (client-side queue) ---
 
-function loadThumb(img, asset, attempt = 0) {
-  img.onerror = () => {
-    if (attempt >= THUMB_RETRY_MS.length) return;
-    setTimeout(() => loadThumb(img, asset, attempt + 1), THUMB_RETRY_MS[attempt]);
-  };
-  // A new URL per attempt: the browser does not refetch an identical failed src.
-  img.src =
-    attempt === 0 ? mediaUrl(asset, 'thumbnail') : `${mediaUrl(asset, 'thumbnail')}?r=${attempt}`;
+const thumbQueue = [];
+let thumbsInFlight = 0;
+
+function jitter(ms) {
+  return Math.round(ms * (0.5 + Math.random()));
 }
 
-function renderGrid() {
+function enqueueThumb(job) {
+  thumbQueue.push(job);
+  pumpThumbs();
+}
+
+function pumpThumbs() {
+  while (thumbsInFlight < THUMB_CONCURRENCY && thumbQueue.length > 0) {
+    const job = thumbQueue.shift();
+    // Tiles from a previous render are gone; do not spend a request on them.
+    if (!job.img.isConnected) continue;
+    thumbsInFlight += 1;
+    loadThumb(job).finally(() => {
+      thumbsInFlight -= 1;
+      pumpThumbs();
+    });
+  }
+}
+
+function loadThumb({ img, asset, attempt }) {
+  return new Promise((resolve) => {
+    img.onload = () => {
+      // Thumbnails keep the photo's aspect ratio (verified): the viewer uses it for its size.
+      if (img.naturalWidth && img.naturalHeight) {
+        asset.aspect = img.naturalWidth / img.naturalHeight;
+      }
+      resolve();
+    };
+    img.onerror = () => {
+      resolve();
+      if (attempt >= THUMB_RETRY_MS.length) return;
+      setTimeout(
+        () => enqueueThumb({ img, asset, attempt: attempt + 1 }),
+        jitter(THUMB_RETRY_MS[attempt]),
+      );
+    };
+    // A new URL per attempt: the browser does not refetch an identical failed src.
+    img.src =
+      attempt === 0 ? mediaUrl(asset, 'thumbnail') : `${mediaUrl(asset, 'thumbnail')}?r=${attempt}`;
+  });
+}
+
+const thumbObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      thumbObserver.unobserve(entry.target);
+      const { img, asset } = entry.target.gwThumb;
+      enqueueThumb({ img, asset, attempt: 0 });
+    }
+  },
+  { rootMargin: THUMB_ROOT_MARGIN },
+);
+
+function listSignature(list) {
+  return list.map((a) => `${a.id}:${a.mine ? 1 : 0}:${a.by ?? ''}`).join('|');
+}
+
+/** Show a fresh listing; an unchanged one keeps the current tiles (and their scroll position). */
+function renderGrid(list) {
+  $('gallery-count').textContent = `${list.length} 件`;
+  $('gallery-empty').hidden = list.length > 0;
+  const signature = listSignature(list);
+  if (signature === renderedSignature) return;
+  renderedSignature = signature;
+  assets = list;
+
   const grid = $('grid');
+  thumbObserver.disconnect();
+  thumbQueue.length = 0;
   grid.textContent = '';
   const fragment = document.createDocumentFragment();
   assets.forEach((asset, index) => {
@@ -71,10 +145,9 @@ function renderGrid() {
     );
     const img = document.createElement('img');
     img.alt = '';
-    img.loading = 'lazy';
     img.decoding = 'async';
-    loadThumb(img, asset);
     tile.append(img);
+    tile.gwThumb = { img, asset };
     if (asset.type === 'video') {
       const badge = document.createElement('span');
       badge.className = 'badge';
@@ -91,25 +164,24 @@ function renderGrid() {
     fragment.append(tile);
   });
   grid.append(fragment);
-  $('gallery-count').textContent = `${assets.length} 件`;
-  $('gallery-empty').hidden = assets.length > 0;
+  for (const tile of grid.children) thumbObserver.observe(tile);
 }
 
 // --- Viewer (PhotoSwipe) ---
 
+/** Display size: the long side from Immich, the aspect ratio from what was actually loaded. */
+function slideSize(asset) {
+  const longSide = Math.max(asset.width || 0, asset.height || 0) || 1200;
+  const aspect = asset.aspect ?? (asset.width && asset.height ? asset.width / asset.height : 1);
+  return aspect >= 1
+    ? { width: longSide, height: Math.round(longSide / aspect) }
+    : { width: Math.round(longSide * aspect), height: longSide };
+}
+
 function slideData(asset) {
-  // Preview size is unknown until loaded; the original's aspect ratio is close enough and is
-  // corrected on load (see loadComplete below).
-  const width = asset.width || 1200;
-  const height = asset.height || 1200;
-  if (asset.type === 'video') return { type: 'video', asset, width, height };
-  return {
-    src: mediaUrl(asset, 'preview'),
-    msrc: mediaUrl(asset, 'thumbnail'),
-    asset,
-    width,
-    height,
-  };
+  const size = slideSize(asset);
+  if (asset.type === 'video') return { type: 'video', asset, ...size };
+  return { src: mediaUrl(asset, 'preview'), msrc: mediaUrl(asset, 'thumbnail'), asset, ...size };
 }
 
 function captionText(asset) {
@@ -123,6 +195,10 @@ function saveLabel(asset) {
   return prepared.has(asset.id) ? '写真に保存' : '保存';
 }
 
+function currentAsset() {
+  return lightbox?.pswp?.currSlide?.data.asset ?? null;
+}
+
 function downloadDirectly(asset) {
   const link = document.createElement('a');
   link.href = `${mediaUrl(asset, 'original')}?download=1`;
@@ -132,19 +208,28 @@ function downloadDirectly(asset) {
   link.remove();
 }
 
+/** Show the note only while the guest is still on the photo it is about. */
+function noteFor(asset, text) {
+  if (currentAsset()?.id === asset.id) $('viewer-note').textContent = text;
+}
+
 async function onSave(button, asset) {
   if (asset.type === 'video' || !canShareFiles()) {
     downloadDirectly(asset);
-    $('viewer-note').textContent =
-      asset.type === 'video' ? '動画はダウンロードされます(iPhone は「ファイル」アプリ)' : '';
+    noteFor(
+      asset,
+      asset.type === 'video' ? '動画はダウンロードされます(iPhone は「ファイル」アプリ)' : '',
+    );
     return;
   }
   const file = prepared.get(asset.id);
   if (file) {
     try {
       await navigator.share({ files: [file] });
+      prepared.clear();
     } catch (err) {
-      // AbortError = the guest closed the share sheet; anything else → plain download.
+      // AbortError = the guest closed the share sheet (keep the file for another try);
+      // anything else → plain download.
       if (err?.name !== 'AbortError') downloadDirectly(asset);
     }
     return;
@@ -158,13 +243,30 @@ async function onSave(button, asset) {
     const blob = await res.blob();
     prepared.clear();
     prepared.set(asset.id, new File([blob], asset.filename || 'photo.jpg', { type: blob.type }));
-    $('viewer-note').textContent = 'もう一度タップすると写真アプリに保存できます';
+    noteFor(asset, 'もう一度タップすると写真アプリに保存できます');
   } catch {
-    $('viewer-note').textContent = '取得できませんでした。もう一度お試しください';
+    noteFor(asset, '取得できませんでした。もう一度お試しください');
   } finally {
+    // The guest may have swiped meanwhile: label the button for the photo shown now.
     button.disabled = false;
-    button.textContent = saveLabel(asset);
+    const shown = currentAsset();
+    if (shown) button.textContent = saveLabel(shown);
   }
+}
+
+// Videos only stream while their slide is shown: neighbours that PhotoSwipe preloads get a
+// poster but no src, so they cannot use up the per-device video/original slots.
+function startVideo(content) {
+  const video = content.element?.querySelector('video');
+  if (video && !video.getAttribute('src')) video.src = mediaUrl(content.data.asset, 'video');
+}
+
+function stopVideo(video) {
+  if (!video?.getAttribute('src')) return;
+  video.pause();
+  video.removeAttribute('src');
+  // Aborts the pending request so the gateway frees the slot.
+  video.load();
 }
 
 function createVideoContent(content) {
@@ -175,9 +277,22 @@ function createVideoContent(content) {
   video.playsInline = true;
   video.preload = 'metadata';
   video.poster = mediaUrl(content.data.asset, 'preview');
-  video.src = mediaUrl(content.data.asset, 'video');
   wrapper.append(video);
   return wrapper;
+}
+
+/** Fix the slide size if the loaded image's aspect differs, and remember it for next time. */
+function correctAspect(content) {
+  const img = content?.element;
+  if (!(img instanceof HTMLImageElement) || !img.naturalWidth || !img.naturalHeight) return;
+  const { asset } = content.data;
+  const natural = img.naturalWidth / img.naturalHeight;
+  if (Math.abs(natural - content.data.width / content.data.height) < 0.02) return;
+  asset.aspect = natural;
+  const index = lightbox.options.dataSource.findIndex((item) => item.asset === asset);
+  if (index === -1) return;
+  Object.assign(lightbox.options.dataSource[index], slideSize(asset));
+  lightbox.pswp.refreshSlideContent(index);
 }
 
 function setupLightbox() {
@@ -199,35 +314,24 @@ function setupLightbox() {
     event.preventDefault();
     content.element = createVideoContent(content);
   });
-  // Pause videos that are swiped away; drop their source when the slide is destroyed so the
-  // download stops (the gateway also closes idle streams).
+  lightbox.on('contentActivate', ({ content }) => {
+    if (content.type === 'video') startVideo(content);
+    // Preloaded/cached images never fire loadComplete with a slide: check them here too.
+    else if (content.element?.complete) correctAspect(content);
+  });
   lightbox.on('contentDeactivate', ({ content }) => {
-    content.element?.querySelector('video')?.pause();
+    stopVideo(content.element?.querySelector('video'));
   });
-  lightbox.on('contentDestroy', ({ content }) => {
-    const video = content.element?.querySelector('video');
-    if (video) {
-      video.removeAttribute('src');
-      video.load();
-    }
-  });
-
-  // Correct the aspect ratio once the real preview is known (e.g. rotated phone photos).
-  lightbox.on('loadComplete', ({ content, slide }) => {
-    const img = content.element;
-    if (!img?.naturalWidth || !slide) return;
-    const natural = img.naturalWidth / img.naturalHeight;
-    const declared = content.data.width / content.data.height;
-    if (Math.abs(natural - declared) < 0.02) return;
-    const longSide = Math.max(content.data.width, content.data.height);
-    const item = lightbox.options.dataSource[slide.index];
-    item.width = natural >= 1 ? longSide : Math.round(longSide * natural);
-    item.height = natural >= 1 ? Math.round(longSide / natural) : longSide;
-    lightbox.pswp.refreshSlideContent(slide.index);
+  lightbox.on('loadComplete', ({ content }) => correctAspect(content));
+  // PhotoSwipe drops its listeners before destroying slides, so release everything on close.
+  lightbox.on('close', () => {
+    for (const video of lightbox.pswp.element?.querySelectorAll('video') ?? []) stopVideo(video);
+    prepared.clear();
   });
 
   lightbox.on('uiRegister', () => {
     const { ui } = lightbox.pswp;
+    let shownIndex = -1;
     ui.registerElement({
       name: 'gw-save',
       order: 9,
@@ -239,7 +343,11 @@ function setupLightbox() {
         el.classList.add('gw-save');
         pswp.on('change', () => {
           el.textContent = saveLabel(pswp.currSlide.data.asset);
-          $('viewer-note').textContent = '';
+          // refreshSlideContent also fires 'change'; only a real slide change clears the note.
+          if (pswp.currIndex !== shownIndex) {
+            shownIndex = pswp.currIndex;
+            $('viewer-note').textContent = '';
+          }
         });
       },
       onClick: (_event, el, pswp) => onSave(el, pswp.currSlide.data.asset),
@@ -252,15 +360,14 @@ function setupLightbox() {
       onInit: (el, pswp) => {
         el.className = 'gw-caption';
         const text = document.createElement('div');
-        const note = $('viewer-note');
-        el.append(text, note);
+        el.append(text, $('viewer-note'));
         pswp.on('change', () => {
           text.textContent = captionText(pswp.currSlide.data.asset);
         });
       },
     });
   });
-  // The note element lives inside the viewer while it is open; park it again on close.
+  // The note element lives inside the viewer while it is open; park it again afterwards.
   lightbox.on('destroy', () => {
     const note = $('viewer-note');
     note.textContent = '';
@@ -286,11 +393,18 @@ async function refresh(api, { force = false } = {}) {
   loading = (async () => {
     try {
       const res = await api('/api/assets');
-      if (res.status === 401) return;
+      if (res.status === 401) {
+        $('gallery-status').textContent = '';
+        onUnauthorized();
+        return;
+      }
       if (!res.ok) throw new Error(String(res.status));
-      ({ assets } = await res.json());
+      const previous = new Map(assets.map((a) => [a.id, a]));
+      const { assets: list } = await res.json();
+      // Keep aspect ratios learned from loaded thumbnails across refreshes.
+      for (const asset of list) asset.aspect = previous.get(asset.id)?.aspect;
       loadedAt = Date.now();
-      renderGrid();
+      renderGrid(list);
       $('gallery-status').textContent = '';
     } catch (err) {
       if (err?.message !== 'closed') {
@@ -303,8 +417,13 @@ async function refresh(api, { force = false } = {}) {
   return loading;
 }
 
-/** Wire the gallery tab; call once after login when the server reports `gallery: true`. */
-export function initGallery(api) {
+/**
+ * Wire the gallery tab; call once after login when the server reports `gallery: true`.
+ * @param {(path: string, options?: RequestInit) => Promise<Response>} api
+ * @param {{ onUnauthorized: () => void }} hooks session expired → back to the login screen
+ */
+export function initGallery(api, hooks) {
+  onUnauthorized = hooks.onUnauthorized;
   if (!lightbox) setupLightbox();
   $('gallery-refresh').onclick = () => refresh(api, { force: true });
   return { show: () => refresh(api) };

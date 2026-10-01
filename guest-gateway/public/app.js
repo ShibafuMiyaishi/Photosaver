@@ -125,7 +125,7 @@ function showTab(name) {
   $('tab-upload').setAttribute('aria-pressed', String(name === 'upload'));
   $('tab-gallery').setAttribute('aria-pressed', String(name === 'gallery'));
   if (name === 'gallery') {
-    gallery ??= initGallery(api);
+    gallery ??= initGallery(api, { onUnauthorized: () => show('login') });
     gallery.show();
   }
 }
