@@ -367,6 +367,12 @@ describe('createImmichClient', () => {
     expect(err).toBeInstanceOf(ImmichError);
     expect(err.status).toBe(400);
     expect(err.message).not.toContain('internal');
+    // An already-cancelled request never reaches Immich.
+    const before = fake.requests.length;
+    await expect(
+      client.downloadArchive({ assetIds: [ASSET], signal: AbortSignal.abort() }),
+    ).rejects.toBeInstanceOf(ImmichError);
+    expect(fake.requests.length).toBe(before);
     for (const assetIds of [[], ['nope'], undefined]) {
       await expect(client.downloadArchive({ assetIds })).rejects.toBeInstanceOf(ImmichError);
     }

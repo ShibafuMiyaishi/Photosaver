@@ -286,6 +286,8 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
   let queue = [];
   // Items to save one by one (too large for the batch, or refused by the share sheet).
   let manual = [];
+  // Ids the share sheet refused during this visit.
+  const refused = new Set();
   let failed = 0;
   let failedInRow = 0;
   let saved = 0;
@@ -321,6 +323,11 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
     if (!('wakeLock' in navigator) || wakeLock) return;
     try {
       wakeLock = await navigator.wakeLock.request('screen');
+      // The run already ended while the lock was being granted.
+      if (!controller) {
+        releaseScreen();
+        return;
+      }
       wakeLock.addEventListener('release', () => {
         wakeLock = null;
       });
@@ -434,9 +441,14 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
     status('準備しています…');
     while (batch.length === 0 && queue.length > 0) {
       let bytes = 0;
-      const goal = Math.min(SHARE_BATCH_FILES, queue.length);
       while (queue.length > 0 && batch.length < SHARE_BATCH_FILES && bytes < SHARE_BATCH_BYTES) {
         const asset = queue[0];
+        // Refused by the share sheet earlier in this visit: do not download it again.
+        if (refused.has(asset.id)) {
+          queue.shift();
+          manual.push(asset);
+          continue;
+        }
         const limit =
           batch.length === 0
             ? SHARE_BULK_MAX_FILE_BYTES
@@ -453,10 +465,11 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
             batch.push({ asset, file });
             bytes += file.size;
           } else {
+            refused.add(asset.id);
             manual.push(asset);
           }
         }
-        progress(`準備中… ${Math.min(batch.length, goal)} / ${goal} 件`);
+        progress(`準備中… ${batch.length} 件(1 回に最大 ${SHARE_BATCH_FILES} 件)`);
       }
       renderManual();
     }
@@ -492,6 +505,7 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
         return;
       }
       // The sheet refused these files: offer them one by one and go on with the rest.
+      for (const b of batch) refused.add(b.asset.id);
       manual.push(...batch.map((b) => b.asset));
       batch = [];
       renderManual();

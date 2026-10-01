@@ -47,6 +47,8 @@ let permissions = { role: 'guest', canDelete: false };
 const prepared = new Map();
 const mode = saveMode();
 let bulk = null;
+// Asset whose original the save button is fetching right now (first tap).
+let preparingId = null;
 
 function mediaUrl(asset, kind) {
   return `/media/${encodeURIComponent(asset.id)}/${kind}`;
@@ -258,6 +260,8 @@ async function onSave(button, asset) {
       await navigator.share({ files: [ready] });
       prepared.clear();
       markSaved([asset.id]);
+      const shown = currentAsset();
+      if (shown) button.textContent = saveLabel(shown);
     } catch (err) {
       // AbortError = the guest closed the share sheet (keep the file for another try).
       // Anything else: the sheet refused the file; the next tap downloads it instead (a download
@@ -275,9 +279,12 @@ async function onSave(button, asset) {
   // First tap: fetch the original now (the share sheet needs the file before the next tap).
   button.disabled = true;
   button.textContent = '準備中…';
+  preparingId = asset.id;
   try {
     const result = await fetchOriginal(asset, { maxBytes: SHARE_MAX_FILE_BYTES });
     prepared.clear();
+    // The guest moved on or closed the viewer meanwhile: do not keep the file in memory.
+    if (currentAsset()?.id !== asset.id) return;
     if (result.missing) {
       noteFor(asset, 'この写真は削除されています');
     } else if (result.tooLarge) {
@@ -295,6 +302,7 @@ async function onSave(button, asset) {
     }
     noteFor(asset, '取得できませんでした。もう一度お試しください');
   } finally {
+    preparingId = null;
     // The guest may have swiped meanwhile: label the button for the photo shown now.
     button.disabled = false;
     const shown = currentAsset();
@@ -447,7 +455,8 @@ function setupLightbox() {
         pswp.on('change', () => {
           // A prepared original (up to hundreds of MB) is only kept for the item on screen.
           if (!prepared.has(pswp.currSlide.data.asset.id)) prepared.clear();
-          el.textContent = saveLabel(pswp.currSlide.data.asset);
+          // While an original is being fetched the (disabled) button keeps saying so.
+          el.textContent = preparingId ? '準備中…' : saveLabel(pswp.currSlide.data.asset);
           // refreshSlideContent also fires 'change'; only a real slide change clears the note.
           if (pswp.currIndex !== shownIndex) {
             shownIndex = pswp.currIndex;

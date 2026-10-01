@@ -489,6 +489,11 @@ export function createGalleryRouter({
         'ZIP を作成できませんでした。一覧に戻って、もう一度「ZIP を作成」してください。',
       );
     }
+    // The guest left while Immich was starting the ZIP.
+    if (controller.signal.aborted) {
+      await upstream.body?.cancel().catch(() => {});
+      return undefined;
+    }
     res.set({
       'Content-Type': 'application/zip',
       'Content-Disposition': `attachment; filename="${filename}"`,
