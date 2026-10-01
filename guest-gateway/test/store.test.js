@@ -101,7 +101,9 @@ describe('upload store', () => {
     expect(store.isOwnAsset(asset, 'dev-1')).toBe(true);
     expect(store.isOwnAsset(asset, 'dev-2')).toBe(false);
 
+    expect(store.wasDeleted(asset)).toBe(false);
     store.markDeleted(asset);
+    expect(store.wasDeleted(asset)).toBe(true);
     expect(store.isOwnAsset(asset, 'dev-1')).toBe(false);
     expect(store.uploaders([asset]).size).toBe(0);
     expect(store.get('copy').status).toBe('deleted');

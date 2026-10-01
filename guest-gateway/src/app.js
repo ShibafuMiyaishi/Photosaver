@@ -94,6 +94,8 @@ export function createApp(config, { store, importer, immich } = {}) {
   );
   const lockout = createLockout();
   const isClosed = () => Date.now() >= config.closesAt;
+  // Fingerprint of the organiser password hash, stored in admin sessions.
+  const adminTag = config.adminPasswordHash ? shortHash(config.adminPasswordHash) : null;
 
   app.set('trust proxy', config.trustProxyHops);
   app.disable('x-powered-by');
@@ -146,6 +148,9 @@ export function createApp(config, { store, importer, immich } = {}) {
   // Session from the signed cookie (if any).
   app.use((req, _res, next) => {
     const session = verifySession(readCookie(req, cookieName(config)), config.sessionSecret);
+    // Admin sessions are bound to the current organiser password: clearing or changing
+    // ADMIN_PASSWORD_HASH (and restarting) demotes existing admin cookies to guests.
+    if (session?.role === 'admin' && session.adminTag !== adminTag) session.role = 'guest';
     if (session) req.gwSession = { ...session, deviceShort: shortHash(session.deviceId) };
     next();
   });
@@ -262,6 +267,7 @@ export function createApp(config, { store, importer, immich } = {}) {
       }
       lockout.recordSuccess(req.ip);
       const session = { deviceId: newDeviceId(), nickname, role, exp: config.closesAt };
+      if (role === 'admin') session.adminTag = adminTag;
       res.cookie(cookieName(config), signSession(session, config.sessionSecret), {
         httpOnly: true,
         secure: config.cookieSecure,

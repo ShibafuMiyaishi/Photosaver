@@ -42,14 +42,14 @@ function fakeImmich() {
   };
 }
 
-async function setup({ deleteApiKey = 'delete-key', withAdmin = true } = {}) {
+async function setup({ deleteApiKey = 'delete-key', withAdmin = true, adminPasswordHash } = {}) {
   adminHash ??= await hashPassword(ADMIN_PASSWORD);
   const store = openStore(':memory:');
   const immich = fakeImmich();
   const srv = await startServer(
     {
       immich: { albumId: ALBUM, deleteApiKey },
-      adminPasswordHash: withAdmin ? adminHash : '',
+      adminPasswordHash: adminPasswordHash ?? (withAdmin ? adminHash : ''),
     },
     { store, importer: { enqueue() {} }, immich },
   );
@@ -141,6 +141,33 @@ describe('deleting assets', () => {
     expect((await del(ctx.srv, ctx.guest, MINE)).status).toBe(404);
     ctx.immich.deleteError = new ImmichError('delete', 503);
     expect((await del(ctx.srv, ctx.guest, MINE)).status).toBe(502);
+    // A wrong or under-permissioned delete key must never look like a successful delete.
+    for (const status of [401, 403]) {
+      ctx.immich.deleteError = new ImmichError('delete', status);
+      expect((await del(ctx.srv, ctx.guest, MINE)).status).toBe(502);
+    }
     expect((await del(ctx.srv, ctx.guest, 'not-a-uuid')).status).toBe(404);
+  });
+
+  it('limits even the organiser to assets in the event album', async () => {
+    ctx = await setup();
+    const admin = (await login(ctx.srv.baseUrl, ADMIN_PASSWORD, '幹事')).cookie;
+    const outside = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+    expect((await del(ctx.srv, admin, outside)).status).toBe(404);
+    expect(ctx.immich.deleted).toEqual([]);
+  });
+
+  it('demotes admin sessions when the organiser password changes', async () => {
+    ctx = await setup();
+    const admin = (await login(ctx.srv.baseUrl, ADMIN_PASSWORD, '幹事')).cookie;
+    await ctx.srv.close();
+    ctx.store.close();
+    // Same session secret, new organiser password: the old admin cookie is only a guest now.
+    ctx = await setup({ adminPasswordHash: await hashPassword('a brand new organiser pw') });
+    const session = await (
+      await fetch(`${ctx.srv.baseUrl}/api/session`, { headers: { Cookie: admin } })
+    ).json();
+    expect(session.role).toBe('guest');
+    expect((await del(ctx.srv, admin, THEIRS)).status).toBe(403);
   });
 });

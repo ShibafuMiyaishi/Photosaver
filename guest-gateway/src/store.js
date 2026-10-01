@@ -1,13 +1,15 @@
 // guest-gateway/src/store.js
 // 取り込み状態の記録(node:sqlite)。1 行 = 受信済みの 1 ファイル。
 // 誰の端末から上がったか(deviceId・ニックネーム)と Immich の assetId を残し、
-// 状態表示・再起動後の取り込み再開・(次の段階で)削除権限の判定に使う。
+// 状態表示・再起動後の取り込み再開・削除権限の判定(本人の投稿か)に使う。
 
 import { DatabaseSync } from 'node:sqlite';
 
 // pending: waiting for / retrying the Immich upload. created / duplicate: in the album.
 // failed: given up (the staged file is gone). deleted: the asset was moved to Immich's trash.
-export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'deleted'];
+// trashed: re-uploaded after it was deleted here; Immich matches the trashed copy (verified on
+// v3.2.4) and does not put it back in the album.
+export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'deleted', 'trashed'];
 const UPLOADER_CHUNK = 500;
 
 const SCHEMA = `
@@ -72,6 +74,9 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const ownCreated = db.prepare(
     "SELECT 1 FROM uploads WHERE asset_id = ? AND device_id = ? AND status = 'created' LIMIT 1",
   );
+  const deletedAsset = db.prepare(
+    "SELECT 1 FROM uploads WHERE asset_id = ? AND status = 'deleted' LIMIT 1",
+  );
   const setDeleted = db.prepare(
     "UPDATE uploads SET status = 'deleted', updated_at = ? WHERE asset_id = ? AND status IN ('created', 'duplicate')",
   );
@@ -104,7 +109,7 @@ export function openStore(dbPath, { now = Date.now } = {}) {
       return getOne.get(uploadId);
     },
 
-    /** @param {'created'|'duplicate'} status */
+    /** @param {'created'|'duplicate'|'trashed'} status */
     markImported(uploadId, status, assetId) {
       setDone.run(status, assetId, now(), uploadId);
     },
@@ -163,6 +168,11 @@ export function openStore(dbPath, { now = Date.now } = {}) {
     /** The asset went to Immich's trash: it no longer belongs to anyone's uploads. */
     markDeleted(assetId) {
       setDeleted.run(now(), assetId);
+    },
+
+    /** True when this asset was deleted through the gateway (it sits in Immich's trash). */
+    wasDeleted(assetId) {
+      return deletedAsset.get(assetId) !== undefined;
     },
 
     /** Rows still waiting for Immich, oldest first (resumed after a restart). */

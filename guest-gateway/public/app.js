@@ -25,7 +25,8 @@ let pollTimer = null;
 // Set once the server reports the gallery (import mode).
 let galleryEnabled = false;
 // Role and delete availability from the server (admin = organiser, may delete anything).
-const permissions = { role: 'guest', canDelete: false };
+// sessionId changes on every login so the gallery knows its `mine` flags are stale.
+const permissions = { role: 'guest', canDelete: false, sessionId: 0 };
 let gallery = null;
 
 function formatBytes(bytes) {
@@ -165,6 +166,10 @@ function recallNickname() {
 const IMPORT_RESULT = {
   created: { status: 'done', text: '完了 — アルバムに追加しました' },
   duplicate: { status: 'done', text: '完了 — 同じ写真が既にアルバムにあります' },
+  trashed: {
+    status: 'rejected',
+    text: '以前に削除された写真のため追加されませんでした(戻したい場合は幹事に連絡してください)',
+  },
   failed: {
     status: 'rejected',
     text: 'アルバムへの追加に失敗しました(お手数ですが幹事に連絡してください)',
@@ -436,6 +441,7 @@ async function submitLogin() {
     $('password').value = '';
     const { role } = await res.json().catch(() => ({}));
     permissions.role = role ?? 'guest';
+    permissions.sessionId += 1;
     const nickname = $('nickname').value.trim();
     rememberNickname(nickname);
     setGreeting(nickname);

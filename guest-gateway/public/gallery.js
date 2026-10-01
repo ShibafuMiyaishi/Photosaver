@@ -134,7 +134,8 @@ function listSignature(list) {
 }
 
 /** Show a fresh listing; an unchanged one keeps the current tiles (and their scroll position). */
-function renderGrid(list) {
+function renderGrid(fullList) {
+  const list = fullList.filter((a) => !deletedIds.has(a.id));
   $('gallery-count').textContent = `${list.length} 件`;
   $('gallery-empty').hidden = list.length > 0;
   const signature = listSignature(list);
@@ -279,18 +280,27 @@ function canDeleteAsset(asset) {
   return permissions.canDelete && (asset.mine || permissions.role === 'admin');
 }
 
+// Ids deleted in this session: hidden from every listing, including one that was already in
+// flight when the delete finished.
+const deletedIds = new Set();
+let confirmTimer = null;
+
+function resetDeleteButton(button) {
+  clearTimeout(confirmTimer);
+  confirmTimer = null;
+  delete button.dataset.confirm;
+  button.textContent = '削除';
+}
+
 async function onDelete(button, asset) {
   if (button.dataset.confirm !== asset.id) {
+    resetDeleteButton(button);
     button.dataset.confirm = asset.id;
     button.textContent = '本当に削除';
-    setTimeout(() => {
-      if (button.dataset.confirm !== asset.id) return;
-      delete button.dataset.confirm;
-      button.textContent = '削除';
-    }, DELETE_CONFIRM_MS);
+    confirmTimer = setTimeout(() => resetDeleteButton(button), DELETE_CONFIRM_MS);
     return;
   }
-  delete button.dataset.confirm;
+  resetDeleteButton(button);
   button.disabled = true;
   button.textContent = '削除中…';
   try {
@@ -302,10 +312,15 @@ async function onDelete(button, asset) {
       onUnauthorized();
       return;
     }
+    if (res.status === 403) {
+      noteFor(asset, 'この写真は削除できません(自分の端末から上げた写真だけ削除できます)');
+      return;
+    }
     if (!res.ok && res.status !== 404) throw new Error(String(res.status));
     // 404 = already gone (e.g. deleted by the organiser): drop it from the grid all the same.
+    deletedIds.add(asset.id);
     lightbox.pswp?.close();
-    renderGrid(assets.filter((a) => a.id !== asset.id));
+    renderGrid(assets);
     $('gallery-status').textContent = '削除しました';
   } catch (err) {
     if (err?.message !== 'closed') noteFor(asset, '削除できませんでした。もう一度お試しください');
@@ -425,10 +440,7 @@ function setupLightbox() {
         pswp.on('change', () => {
           const asset = pswp.currSlide.data.asset;
           el.hidden = !canDeleteAsset(asset);
-          if (el.dataset.confirm !== asset.id) {
-            delete el.dataset.confirm;
-            el.textContent = '削除';
-          }
+          if (el.dataset.confirm !== asset.id) resetDeleteButton(el);
         });
       },
       onClick: (_event, el, pswp) => onDelete(el, pswp.currSlide.data.asset),
@@ -512,6 +524,8 @@ export function initGallery(api, hooks) {
     show: () => refresh(api),
     /** @param {{ role: string, canDelete: boolean }} next from /api/session or after login */
     setPermissions: (next) => {
+      // A new login means a new device id: `mine` in the cached list belongs to the old one.
+      if (next.role !== permissions.role || next.sessionId !== permissions.sessionId) loadedAt = 0;
       permissions = next;
     },
   };

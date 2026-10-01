@@ -140,11 +140,13 @@ fi
 [ -f /srv/photosaver/guest-gateway/.env ] || \
   install -m 600 /srv/photosaver/repo/guest-gateway/.env.example /srv/photosaver/guest-gateway/.env
 #    TS_AUTHKEY / SESSION_SECRET / GUEST_PASSWORD_HASH / CLOSES_AT を埋める
+#    (任意)ADMIN_PASSWORD_HASH = 幹事用の合言葉(ゲストとは別)。この合言葉で入るとどの写真も削除できる
 #    (MOUNT_MARKER_HOST は上のマーカーのパス。既定値のままでよい)
 openssl rand -hex 32                                         # → SESSION_SECRET
 docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
 read -rs P && printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js; unset P
 #                                                            # → GUEST_PASSWORD_HASH
+#                                         (もう一度、幹事用の合言葉で実行 → ADMIN_PASSWORD_HASH)
 
 # 4. 起動
 docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml \

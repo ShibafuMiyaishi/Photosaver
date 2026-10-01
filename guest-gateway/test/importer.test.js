@@ -208,4 +208,23 @@ describe('import queue', () => {
     expect(store.get('u1').status).toBe('pending');
     expect(await exists('u1')).toBe(true);
   });
+
+  it('records a re-upload of an asset deleted here as trashed (it stays out of the album)', async () => {
+    start(async () => ({ status: 'duplicate', id: ASSET_ID }));
+    store.add({
+      uploadId: 'old',
+      deviceId: 'dev-1',
+      nickname: 'たろう',
+      filename: 'a.jpg',
+      mime: 'image/jpeg',
+      size: 5,
+      lastModified: null,
+    });
+    store.markImported('old', 'created', ASSET_ID);
+    store.markDeleted(ASSET_ID);
+    await receive('u1');
+    importer.enqueue('u1');
+    await importer.idle();
+    expect(store.get('u1')).toMatchObject({ status: 'trashed', asset_id: ASSET_ID });
+  });
 });
