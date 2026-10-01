@@ -149,7 +149,7 @@ docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file $GW/
 
 QR コードには**窓口の URL だけ**を入れる(合言葉は入れない。カードに文字で書く)。
 URL は `docker exec guest_gateway_ts tailscale funnel status` に表示される `https://….ts.net`。
-QR は手元の PC で作る(例: `qrencode -o qr.png '<URL>'`、Mac なら `brew install qrencode`)。
+QR は手元の PC でオフラインのツールを使って作る(例: `qrencode -o qr.png '<URL>'`)。
 **URL・合言葉・QR 画像はリポジトリや報告に書かない。**
 
 カードの文面(例):

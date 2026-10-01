@@ -14,7 +14,9 @@ When working with any of these files:
 | guest-gateway `IMMICH_SHARE_KEY`, `IMMICH_DELETE_API_KEY`, `IMMICH_ALBUM_ID` | `${GW_DATA_DIR}/immich.env` (mode 600, written by `scripts/setup-event.js`) |
 | FROZEN album-guard `GUARD_JWT_SECRET`, `album-passwords.json` | old Windows env (`immich/.env`, external drive) |
 
-The Mac holds no server secrets (dev values only, e.g. dev Immich credentials under `tmp/`).
+Dev machines hold no server secrets: server secrets live only in the mini PC's env files (the
+home PC reaches them over SSH; never copy them into the repo or `tmp/`). Dev values (e.g. the dev
+Immich credentials under `tmp/`) are dummies.
 
 ## Never commit
 

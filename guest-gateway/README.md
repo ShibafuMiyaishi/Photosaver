@@ -5,7 +5,7 @@
 設計と当日の運用は [docs/guest-gateway.md](../docs/guest-gateway.md)、実装ルールは
 [.claude/rules/guest-gateway.md](../.claude/rules/guest-gateway.md)。
 
-> **状態(2026-10)**: 機能はすべて実装済み(Mac 上のテストと開発用 Immich で確認)。
+> **状態(2026-10)**: 機能はすべて実装済み(テストと開発用 Immich で確認)。
 > ミニPCへのデプロイ・Funnel の速度計測・スマホ実機での確認は自宅PCで実施する
 > ([.claude/handoff/tasks.md](../.claude/handoff/tasks.md) の T1〜T4)。
 
@@ -37,9 +37,12 @@
 | `scripts/event-status.js` | 当日の状況確認(件数・容量・期限までの残り・HDD の空き。読み取り専用) |
 | `scripts/hash-password.js` | 合言葉のハッシュを作る |
 | `compose.yml` / `ts-config/serve.json` | Tailscale サイドカー(専用ノード、Funnel で 443 公開)+ 窓口。プロジェクト名 `wedding-gw` |
-| `dev/compose.yml` | 開発用 Immich v3.2.4(Mac のローカル専用) |
+| `dev/compose.yml` | 開発用 Immich v3.2.4(開発機のローカル専用。本番には使わない) |
 
-## 開発(Mac)
+## 開発(自宅PC / Mac)
+
+開発機(自宅の Windows PC、出張中は Mac)で行う。Docker Desktop と Node 24 が必要。コマンドは bash 用
+(Windows では Git Bash で実行する)。
 
 ```bash
 cd guest-gateway

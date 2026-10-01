@@ -45,7 +45,7 @@ Immich を専用ミニ PC でセルフホストし、**家族・友達とイベ�
 - 自分の投稿の削除(幹事は管理者の合言葉で全件削除可)、受付期限で自動終了、速度検証モード
 - 補助スクリプト: Immich 側のイベント準備(`setup-event.js`)、当日の状況確認(`event-status.js`)
 
-状態: Mac 側の実装は完了。ミニ PC へのデプロイ・Funnel の速度検証・実機確認が残っている
+状態: 実装は完了。ミニ PC へのデプロイ・Funnel の速度検証・実機確認が残っている
 ([.claude/handoff/tasks.md](.claude/handoff/tasks.md))。
 
 ## ディレクトリ概要
@@ -60,7 +60,7 @@ Photosaver/
 ├─ immich/           旧 Windows 検証環境の compose(凍結)
 ├─ scripts/          旧 Windows 環境の補助スクリプト(凍結)
 ├─ CLAUDE.md         Claude Code 向けプロジェクト指示書
-├─ .claude/          Claude Code 設定(handoff/ は Mac ⇄ 自宅 PC の作業引き継ぎ)
+├─ .claude/          Claude Code 設定(handoff/ は出張用 Mac ⇄ 自宅 PC の作業引き継ぎ)
 └─ .github/          CI ワークフロー
 ```
 
