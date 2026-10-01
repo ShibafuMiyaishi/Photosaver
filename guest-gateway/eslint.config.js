@@ -11,6 +11,8 @@ const nodeGlobals = {
   clearInterval: 'readonly',
   fetch: 'readonly',
   URL: 'readonly',
+  AbortSignal: 'readonly',
+  FormData: 'readonly',
 };
 
 const browserGlobals = {

@@ -1,0 +1,162 @@
+// guest-gateway/src/immich.js
+// Immich v3 API の呼び出し。共有リンクキー(1 アルバム限定)と削除専用 API キーだけを使い、
+// Immich のエラー本文や内部 URL は呼び出し元に渡さない。ファイルはメモリに全読み込みしない。
+
+import { openAsBlob } from 'node:fs';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UPLOAD_STATUSES = new Set(['created', 'duplicate']);
+
+export class ImmichError extends Error {
+  /**
+   * @param {string} op short operation name (safe to log)
+   * @param {number} status HTTP status from Immich, or 0 for network/timeout errors
+   */
+  constructor(op, status) {
+    super(`immich ${op} failed (${status || 'network'})`);
+    this.name = 'ImmichError';
+    this.op = op;
+    this.status = status;
+  }
+}
+
+export function isUuid(value) {
+  return typeof value === 'string' && UUID.test(value);
+}
+
+function toIso(ms) {
+  const date = new Date(Number(ms));
+  return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+}
+
+/**
+ * @param {{
+ *   baseUrl: string,
+ *   shareKey?: string,
+ *   deleteApiKey?: string,
+ *   fetchImpl?: typeof fetch,
+ *   timeoutMs?: number,
+ * }} options
+ */
+export function createImmichClient({
+  baseUrl,
+  shareKey,
+  deleteApiKey,
+  fetchImpl = fetch,
+  timeoutMs = 30_000,
+}) {
+  const root = new URL('/api/', baseUrl);
+
+  async function request(op, path, { method = 'GET', auth, json, body, signal, timeout = true }) {
+    const headers = {};
+    if (auth === 'share') {
+      if (!shareKey) throw new ImmichError(op, 0);
+      // Header, never ?key=: query strings end up in access logs.
+      headers['x-immich-share-key'] = shareKey;
+    } else if (auth === 'delete') {
+      if (!deleteApiKey) throw new ImmichError(op, 0);
+      headers['x-api-key'] = deleteApiKey;
+    }
+    if (json !== undefined) headers['content-type'] = 'application/json';
+
+    const signals = [signal, timeout ? AbortSignal.timeout(timeoutMs) : undefined].filter(Boolean);
+    let res;
+    try {
+      res = await fetchImpl(new URL(path, root), {
+        method,
+        headers,
+        body: json !== undefined ? JSON.stringify(json) : body,
+        signal: signals.length ? AbortSignal.any(signals) : undefined,
+        redirect: 'error',
+      });
+    } catch {
+      throw new ImmichError(op, 0);
+    }
+    if (!res.ok) {
+      // Drain without reading: Immich error bodies may contain internal details.
+      await res.body?.cancel().catch(() => {});
+      throw new ImmichError(op, res.status);
+    }
+    return res;
+  }
+
+  async function readJson(op, res) {
+    try {
+      return await res.json();
+    } catch {
+      throw new ImmichError(op, res.status);
+    }
+  }
+
+  return {
+    async serverVersion() {
+      const res = await request('version', 'server/version', {});
+      const { major, minor, patch } = await readJson('version', res);
+      return { major, minor, patch };
+    },
+
+    /**
+     * Upload one file through the album shared link; Immich adds it to the album itself.
+     * @param {{ filePath: string, filename: string, mime: string, lastModified?: number|string,
+     *   signal?: AbortSignal }} file
+     */
+    async uploadAsset({ filePath, filename, mime, lastModified, signal }) {
+      const blob = await openAsBlob(filePath, { type: mime || 'application/octet-stream' });
+      const form = new FormData();
+      const when = toIso(lastModified);
+      // Do NOT send x-immich-checksum: that path short-circuits before the album add.
+      form.append('assetData', blob, filename);
+      form.append('fileCreatedAt', when);
+      form.append('fileModifiedAt', when);
+      form.append('filename', filename);
+      // Large videos over a local link: no fixed timeout, the caller may abort via signal.
+      const res = await request('upload', 'assets', {
+        method: 'POST',
+        auth: 'share',
+        body: form,
+        signal,
+        timeout: false,
+      });
+      const data = await readJson('upload', res);
+      if (!UPLOAD_STATUSES.has(data?.status) || !isUuid(data?.id)) {
+        throw new ImmichError('upload', res.status);
+      }
+      return { status: data.status, id: data.id };
+    },
+
+    async getAlbum(albumId) {
+      if (!isUuid(albumId)) throw new ImmichError('album', 0);
+      const res = await request('album', `albums/${albumId}`, { auth: 'share' });
+      const data = await readJson('album', res);
+      return { id: data.id, albumName: data.albumName, assetCount: data.assetCount };
+    },
+
+    /**
+     * One page of the album's assets, newest first.
+     * @param {{ albumId: string, cursor?: string|null, size?: number }} query
+     */
+    async listAlbumAssets({ albumId, cursor = null, size = 200 }) {
+      if (!isUuid(albumId)) throw new ImmichError('list', 0);
+      const json = {
+        // The v3.2 filter format returns trashed assets unless trashedAt is constrained
+        // (verified against a real v3.2.4); deleted photos must not reappear in the gallery.
+        filter: { albumIds: { any: [albumId] }, trashedAt: { eq: null } },
+        orderBy: { field: 'fileCreatedAt', direction: 'desc' },
+        size,
+        ...(cursor ? { cursor } : {}),
+      };
+      const res = await request('list', 'search/metadata', { method: 'POST', auth: 'share', json });
+      const data = await readJson('list', res);
+      const items = (data?.assets?.items ?? []).filter((asset) => !asset.isTrashed);
+      return { items, nextCursor: data?.assets?.nextCursor ?? null };
+    },
+
+    /** Move assets to the event user's trash (recoverable by the owner). */
+    async deleteAssets(ids) {
+      if (!Array.isArray(ids) || ids.length === 0 || !ids.every(isUuid)) {
+        throw new ImmichError('delete', 0);
+      }
+      await request('delete', 'assets', { method: 'DELETE', auth: 'delete', json: { ids } });
+    },
+  };
+}

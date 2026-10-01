@@ -15,6 +15,9 @@
 | `src/app.js` | ルート定義(ここに無いものは 404)、セキュリティヘッダー、CSRF 対策、期限切れ時の 410 |
 | `src/auth.js` | 合言葉の scrypt 照合、HMAC 署名付きセッション Cookie |
 | `src/uploads.js` | tus 受信(拡張子・サイズ・空き容量の検査、中身の判定、計測ログ) |
+| `src/immich.js` | Immich v3 の呼び出し(共有リンクキーでアップロード・一覧、削除専用キーで削除)。まだ窓口本体には未接続 |
+| `scripts/setup-event.js` | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化 |
+| `dev/compose.yml` | 開発用 Immich v3.2.4(Mac のローカル専用) |
 | `public/` | ゲスト用画面(ビルド工程なし) |
 | `compose.yml` / `ts-config/serve.json` | Tailscale サイドカー(Funnel で 443 公開)+ 窓口 |
 
@@ -37,6 +40,40 @@ CLOSES_AT=2026-12-31T23:59:00+09:00 STAGING_DIR=../tmp/dev-staging \
 COOKIE_SECURE=false MIN_FREE_GB=1 npm start
 # → http://127.0.0.1:8080
 ```
+
+### 開発用 Immich(結合テスト用)
+
+```bash
+docker compose -f dev/compose.yml up -d     # 127.0.0.1:2283、データは ../tmp/dev-immich/
+# 結合テスト(初回は開発用の管理者も自動で作る。値は開発用のダミー)
+IMMICH_IT_URL=http://127.0.0.1:2283 IMMICH_IT_ADMIN_EMAIL=admin@example.com \
+IMMICH_IT_ADMIN_PASSWORD=dev-admin-password-123 npm test
+docker compose -f dev/compose.yml down      # 停止(データは残る)
+```
+
+確認済みの Immich v3.2.4 の挙動(結合テストで検証): 共有リンク経由のアップロードは重複も含めて
+アルバムに自動追加される / 一覧は `nextCursor` で次ページ / **新形式の検索はゴミ箱の写真も返すため
+`trashedAt: {eq: null}` が必要** / 削除専用キーで削除するとゴミ箱へ移り一覧から消える。
+
+## イベント用の Immich 準備(本番)
+
+`scripts/setup-event.js` が、結婚式専用ユーザー → アルバム(管理者を編集者として招待)→
+共有リンク(アップロード/ダウンロード許可・期限付き・パスワードなし)→ 削除専用 API キーを作り、
+秘密情報を権限 600 のファイルにだけ書き出す。ミニPCには Node が無いので窓口のイメージで実行する:
+
+```bash
+docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
+read -rs IMMICH_ADMIN_PASSWORD && export IMMICH_ADMIN_PASSWORD
+docker run --rm --network photosaver_default -v /srv/photosaver/guest-gateway:/out \
+  -e IMMICH_URL=http://immich-server:2283 -e IMMICH_ADMIN_EMAIL=<管理者メール> -e IMMICH_ADMIN_PASSWORD \
+  guest-gateway node scripts/setup-event.js --name '<アルバム名>' --event-email <専用ユーザーのメール> \
+  --expires 2026-10-31T23:59:00+09:00 --out /out/immich.env
+unset IMMICH_ADMIN_PASSWORD
+```
+
+- Immich が 3.2.4 未満なら中止する(SVG 経由の脆弱性の修正版が必要)
+- 途中で失敗した場合、作成済みの専用ユーザーが残る。Immich の管理画面で削除してからやり直す
+- `immich.env` の値(共有リンクキー・削除キー・専用ユーザーのパスワード)は表示・コミットしない
 
 ## 速度検証版のデプロイ(ミニPC / 自宅PCから SSH で実施)
 
