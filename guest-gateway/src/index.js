@@ -1,11 +1,16 @@
 // guest-gateway/src/index.js
-// 起動エントリ。設定検証 → HDD マーカー・ステージング先の確認 → HTTP 待ち受け → 定期処理(期限切れの掃除)。
+// 起動エントリ。設定検証 → HDD マーカー・ステージング先の確認 → (取り込みモードなら)記録 DB と
+// 取り込みキューの準備・未完了分の再開 → HTTP 待ち受け → 定期処理(期限切れの掃除)。
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { createImmichClient } from './immich.js';
+import { createImporter } from './importer.js';
 import { log } from './log.js';
-import { mountMarkerPresent, purgeStaging } from './uploads.js';
+import { openStore } from './store.js';
+import { IMPORT_DIR_NAME, mountMarkerPresent, purgeStaging } from './uploads.js';
 
 const CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 const CLOSE_CHECK_INTERVAL_MS = 60 * 1000;
@@ -33,13 +38,47 @@ try {
   process.exit(1);
 }
 
-const { app, tusServer, isClosed } = createApp(config);
+let store;
+let importer;
+if (config.immich) {
+  try {
+    store = openStore(config.immich.dbPath);
+  } catch (err) {
+    log('error', 'db_unavailable', { error: err.message });
+    process.exit(1);
+  }
+  const immich = createImmichClient({
+    baseUrl: config.immich.baseUrl,
+    shareKey: config.immich.shareKey,
+    deleteApiKey: config.immich.deleteApiKey,
+  });
+  importer = createImporter({
+    store,
+    immich,
+    dir: path.join(config.stagingDir, IMPORT_DIR_NAME),
+  });
+  log('info', 'import_resumed', { count: importer.resume() });
+  // Not fatal: Immich may still be starting; failed imports are retried anyway.
+  Promise.all([immich.serverVersion(), immich.getAlbum(config.immich.albumId)])
+    .then(([version, album]) =>
+      log('info', 'immich_ok', {
+        version: `${version.major}.${version.minor}.${version.patch}`,
+        assets: album.assetCount,
+      }),
+    )
+    .catch((err) => log('warn', 'immich_unreachable', { error: err.message }));
+} else {
+  log('warn', 'speed_test_mode', { reason: 'IMMICH_SHARE_KEY is not set; nothing is imported' });
+}
+
+const { app, tusServer, isClosed } = createApp(config, { store, importer });
 
 const server = app.listen(config.port, config.host, () => {
   log('info', 'listening', {
     host: config.host,
     port: config.port,
     closesAt: new Date(config.closesAt).toISOString(),
+    importing: Boolean(importer),
     keepUploads: config.keepUploads,
   });
 });
@@ -57,7 +96,8 @@ let purged = false;
 const closeTimer = setInterval(() => {
   if (purged || !isClosed()) return;
   purged = true;
-  purgeStaging(config.stagingDir)
+  // Files still waiting for Immich stay; the importer removes each one when it is done.
+  purgeStaging(config.stagingDir, { keep: importer ? [IMPORT_DIR_NAME] : [] })
     .then((count) => log('info', 'closed_staging_purged', { count }))
     .catch((err) => log('error', 'purge_failed', { error: err.message }));
 }, CLOSE_CHECK_INTERVAL_MS);
@@ -66,7 +106,12 @@ function shutdown(signal) {
   log('info', 'shutdown', { signal });
   clearInterval(cleanupTimer);
   clearInterval(closeTimer);
-  server.close(() => process.exit(0));
+  // Pending imports stay pending in the DB and resume on the next start.
+  importer?.stop();
+  server.close(() => {
+    store?.close();
+    process.exit(0);
+  });
   // In-flight uploads are resumable, so do not wait forever.
   setTimeout(() => process.exit(0), 10_000).unref();
 }

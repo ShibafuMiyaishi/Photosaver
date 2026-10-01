@@ -1,5 +1,6 @@
 // guest-gateway/public/app.js
-// ゲスト用画面: 合言葉ログイン → tus で 1 件ずつアップロード(進捗・所要時間・速度を表示)。
+// ゲスト用画面: ニックネーム + 合言葉でログイン → tus で 1 件ずつアップロード(進捗・所要時間・速度を表示)
+// → 送信後はサーバー側の取り込み状態をポーリングし、アルバムに入ったかを表示する。
 // iOS は画面ロックやアプリ切替で通信が止まるため、画面に戻ったら失敗分を自動で再開する。
 
 /* global tus */
@@ -7,11 +8,16 @@
 const CSRF_HEADERS = { 'X-Requested-With': 'guest-gateway' };
 const CHUNK_SIZE = 50 * 1024 * 1024;
 const RETRY_DELAYS = [0, 1000, 3000, 5000, 10000, 20000, 30000];
+const POLL_INTERVAL_MS = 3000;
+const NICKNAME_KEY = 'gw-nickname';
 
 const $ = (id) => document.getElementById(id);
 const items = [];
 let active = null;
 let wakeLock = null;
+// True when the server imports into Immich (false in the speed-test mode).
+let importing = false;
+let pollTimer = null;
 
 function formatBytes(bytes) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
@@ -95,13 +101,85 @@ function updateItem(item, text) {
 }
 
 function updateSummary() {
-  const done = items.filter((i) => i.status === 'done').length;
-  const failed = items.filter((i) => i.status === 'error').length;
-  const rejected = items.filter((i) => i.status === 'rejected').length;
+  const count = (status) => items.filter((i) => i.status === status).length;
+  const failed = count('error');
+  const rejected = count('rejected');
+  const adding = count('importing');
   $('summary').textContent =
-    `完了 ${done} / ${items.length} 件` +
+    `完了 ${count('done')} / ${items.length} 件` +
+    (adding ? `(アルバムに追加中 ${adding} 件)` : '') +
     (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '') +
     (rejected ? `(受付不可 ${rejected} 件)` : '');
+}
+
+function setGreeting(nickname) {
+  $('greeting').textContent = nickname ? `${nickname} さん、ようこそ` : '';
+}
+
+function rememberNickname(nickname) {
+  try {
+    localStorage.setItem(NICKNAME_KEY, nickname);
+  } catch {
+    // Private mode etc.: the field is just not prefilled next time.
+  }
+}
+
+function recallNickname() {
+  try {
+    return localStorage.getItem(NICKNAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+// --- Import status (server → Immich) ---
+
+const IMPORT_RESULT = {
+  created: { status: 'done', text: '完了 — アルバムに追加しました' },
+  duplicate: { status: 'done', text: '完了 — 同じ写真が既にアルバムにあります' },
+  failed: {
+    status: 'rejected',
+    text: 'アルバムへの追加に失敗しました(お手数ですが幹事に連絡してください)',
+  },
+};
+
+/** tus upload id = last path segment of the upload URL. */
+function uploadIdOf(item) {
+  try {
+    return new URL(item.upload.url, document.baseURI).pathname.split('/').pop();
+  } catch {
+    return null;
+  }
+}
+
+function schedulePoll() {
+  if (pollTimer || !items.some((i) => i.status === 'importing')) return;
+  pollTimer = setTimeout(pollImports, POLL_INTERVAL_MS);
+}
+
+async function pollImports() {
+  pollTimer = null;
+  try {
+    const res = await api('/api/uploads');
+    if (res.status === 401) {
+      show('login');
+      return;
+    }
+    if (res.ok) {
+      const { uploads } = await res.json();
+      const byId = new Map(uploads.map((u) => [u.id, u.status]));
+      for (const item of items) {
+        const result = item.status === 'importing' && IMPORT_RESULT[byId.get(item.uploadId)];
+        if (!result) continue;
+        item.status = result.status;
+        updateItem(item, result.text);
+      }
+      updateSummary();
+    }
+  } catch {
+    // Network hiccup or closed: try again on the next tick.
+  }
+  schedulePoll();
 }
 
 // --- Upload ---
@@ -151,10 +229,17 @@ function createUpload(item) {
       );
     },
     onSuccess({ lastResponse }) {
-      item.status = 'done';
       item.el.bar.value = 100;
-      const detected = lastResponse?.getHeader('X-GW-Detected-Type') ?? '?';
-      updateItem(item, `完了 — ${speedText(item, item.file.size)} / 判定 ${detected}`);
+      if (importing) {
+        item.status = 'importing';
+        item.uploadId = uploadIdOf(item);
+        updateItem(item, `送信完了(${speedText(item, item.file.size)})— アルバムに追加中…`);
+        schedulePoll();
+      } else {
+        item.status = 'done';
+        const detected = lastResponse?.getHeader('X-GW-Detected-Type') ?? '?';
+        updateItem(item, `完了 — ${speedText(item, item.file.size)} / 判定 ${detected}`);
+      }
       finish();
     },
     onError(err) {
@@ -236,6 +321,7 @@ function addFiles(fileList) {
       status: 'queued',
       upload: null,
       el: null,
+      uploadId: null,
       startedAt: 0,
       startOffset: null,
     };
@@ -264,12 +350,15 @@ async function loadDiagnostics() {
 
 async function init() {
   const res = await api('/api/session');
-  const { authenticated, closesAt } = await res.json();
+  const { authenticated, nickname, closesAt, importing: importEnabled } = await res.json();
+  importing = Boolean(importEnabled);
   $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
   if (authenticated) {
+    setGreeting(nickname);
     show('uploader');
     loadDiagnostics();
   } else {
+    $('nickname').value = recallNickname();
     show('login');
   }
 }
@@ -280,7 +369,7 @@ async function submitLogin() {
     res = await api('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: $('password').value }),
+      body: JSON.stringify({ nickname: $('nickname').value, password: $('password').value }),
     });
   } catch (err) {
     if (err.message !== 'closed') {
@@ -290,6 +379,9 @@ async function submitLogin() {
   }
   if (res.ok) {
     $('password').value = '';
+    const nickname = $('nickname').value.trim();
+    rememberNickname(nickname);
+    setGreeting(nickname);
     show('uploader');
     loadDiagnostics();
     requeueFailed('待機中(再ログイン後に再開)');
@@ -299,6 +391,12 @@ async function submitLogin() {
       error === 'busy'
         ? '処理中です。少し待ってからもう一度お試しください。'
         : '試行回数が多すぎます。しばらく待ってから再度お試しください。';
+  } else if (res.status === 400) {
+    const { error } = await res.json().catch(() => ({}));
+    $('login-error').textContent =
+      error === 'bad_nickname'
+        ? 'ニックネームは1〜20文字で入力してください。'
+        : '入力内容を確認してください。';
   } else {
     $('login-error').textContent = '合言葉が違います。';
   }
@@ -328,6 +426,7 @@ document.addEventListener('visibilitychange', () => {
   if (active) acquireWakeLock();
   // Uploads that died while the screen was off resume from the last confirmed offset.
   requeueFailed('待機中(再開)');
+  schedulePoll();
 });
 
 init().catch(() => {});

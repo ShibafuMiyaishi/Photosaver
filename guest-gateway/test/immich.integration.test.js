@@ -8,6 +8,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setupEvent } from '../scripts/setup-event.js';
 import { createImmichClient, ImmichError } from '../src/immich.js';
+import { createImporter } from '../src/importer.js';
+import { openStore } from '../src/store.js';
 import { TMP_ROOT } from './helpers/server.js';
 
 const RUN = Boolean(process.env.IMMICH_IT_URL);
@@ -105,6 +107,39 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
     });
     expect(second.items).toHaveLength(1);
     expect(second.items[0].id).not.toBe(firstPage.items[0].id);
+  });
+
+  it('imports a staged file through the queue into the album', async () => {
+    const dir = path.join(TMP_ROOT, `it-import-${crypto.randomUUID().slice(0, 8)}`);
+    await fs.mkdir(dir, { recursive: true });
+    const store = openStore(':memory:');
+    try {
+      // A third distinct PNG: 2x1 pixels, so its checksum differs from A and B.
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR42mP8z8DAwMDAwAAAD/4BAJiuVAoAAAAASUVORK5CYII=',
+        'base64',
+      );
+      await fs.writeFile(path.join(dir, 'up1'), png);
+      store.add({
+        uploadId: 'up1',
+        deviceId: 'dev-it',
+        nickname: 'IT',
+        filename: 'IMG_C.png',
+        mime: 'image/png',
+        size: png.length,
+        lastModified: Date.now(),
+      });
+      const before = (await client.getAlbum(event.albumId)).assetCount;
+      const importer = createImporter({ store, immich: client, dir });
+      importer.enqueue('up1');
+      await importer.idle();
+      expect(store.get('up1')).toMatchObject({ status: 'created' });
+      expect((await client.getAlbum(event.albumId)).assetCount).toBe(before + 1);
+      expect(await fs.readdir(dir)).toEqual([]);
+    } finally {
+      store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('deletes with the delete-only API key', async () => {

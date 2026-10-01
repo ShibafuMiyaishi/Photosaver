@@ -1,8 +1,9 @@
 // guest-gateway/src/uploads.js
 // tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・空き容量を検査し、
 // 受信完了時にファイルの中身(マジックバイト)を判定して計測ログを出す。
-// 速度検証版のため Immich への取り込みはまだ行わず、既定では受信後にファイルを削除する
-// (KEEP_UPLOADS=true のときはステージング内の kept/ に移して残す)。
+// 取り込みモードでは完了したファイルをステージング内の importing/ に移し、onReceived で
+// 取り込みキューに渡す。速度検証モードでは受信後に削除する
+// (KEEP_UPLOADS=true のときは kept/ に移して残す)。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -47,8 +48,10 @@ export const ALLOWED_MIME_TYPES = new Set([
 // Staging is purged at CLOSES_AT anyway.
 const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
 
-// Finished files kept for inspection (KEEP_UPLOADS=true) live outside the tus-managed entries.
+// Finished files live outside the tus-managed entries so tus expiry never touches them:
+// kept/ for inspection (KEEP_UPLOADS=true), importing/ while waiting for Immich.
 export const KEPT_DIR_NAME = 'kept';
+export const IMPORT_DIR_NAME = 'importing';
 
 /** Strip path parts and control characters; keep the name readable for Immich later. */
 export function sanitizeFilename(name) {
@@ -118,25 +121,34 @@ async function freeBytes(dir) {
   return stats.bavail * stats.bsize;
 }
 
+/** Client-reported File.lastModified (ms) from tus metadata, or null if unusable. */
+function parseLastModified(value) {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 /**
  * @param {ReturnType<import('./config.js').loadConfig>} config
+ * @param {{ onReceived?: (file: {
+ *   uploadId: string, deviceId: string, nickname: string, filename: string, mime: string,
+ *   size: number, lastModified: number|null }) => void }} [hooks]
+ *   onReceived switches on import mode: called after the file is in importing/<uploadId>.
  */
-export function createTusServer(config) {
+export function createTusServer(config, { onReceived } = {}) {
   const datastore = new FileStore({
     directory: config.stagingDir,
     expirationPeriodInMilliseconds: FORTY_EIGHT_HOURS_MS,
   });
 
   /** Move a finished file out of tus' reach so expiry cleanup never deletes it. */
-  async function keepFinished(upload, filePath) {
-    const keptDir = path.join(config.stagingDir, KEPT_DIR_NAME);
-    await fs.mkdir(keptDir, { recursive: true });
-    const ext = extensionOf(upload.metadata?.filename ?? '') || 'bin';
-    const keptPath = path.join(keptDir, `${upload.id}.${ext}`);
-    await fs.rename(filePath, keptPath);
+  async function moveFinished(filePath, dirName, name) {
+    const targetDir = path.join(config.stagingDir, dirName);
+    await fs.mkdir(targetDir, { recursive: true });
+    const target = path.join(targetDir, name);
+    await fs.rename(filePath, target);
     // FileStore keeps its info next to the file as `<id>.json`.
     await fs.rm(`${filePath}.json`, { force: true });
-    return keptPath;
+    return target;
   }
 
   const server = new Server({
@@ -180,10 +192,12 @@ export function createTusServer(config) {
         device: session?.deviceShort,
       });
       return {
+        // Identity comes from the signed session, never from client-sent metadata.
         metadata: {
           ...upload.metadata,
           filename,
           deviceId: session?.deviceId ?? '',
+          nickname: session?.nickname ?? '',
         },
       };
     }),
@@ -214,9 +228,23 @@ export function createTusServer(config) {
       }
 
       log('info', 'upload_finished', metrics);
-      if (config.keepUploads) {
+      if (onReceived) {
+        // Errors here surface as a 500 (guardHook) so the guest sees the upload as failed.
+        await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
+        onReceived({
+          uploadId: upload.id,
+          deviceId: upload.metadata?.deviceId ?? '',
+          nickname: upload.metadata?.nickname ?? '',
+          // Sanitized and extension-checked in onUploadCreate.
+          filename: upload.metadata?.filename ?? '',
+          mime,
+          size: upload.size,
+          lastModified: parseLastModified(upload.metadata?.lastModified),
+        });
+      } else if (config.keepUploads) {
         try {
-          const keptPath = await keepFinished(upload, filePath);
+          const ext = extensionOf(upload.metadata?.filename ?? '') || 'bin';
+          const keptPath = await moveFinished(filePath, KEPT_DIR_NAME, `${upload.id}.${ext}`);
           log('info', 'upload_kept', { id: upload.id, file: path.basename(keptPath) });
         } catch (err) {
           log('error', 'staging_keep_failed', { id: upload.id, error: err.message });
@@ -233,9 +261,14 @@ export function createTusServer(config) {
   return server;
 }
 
-/** Remove everything in the staging dir (used once the deadline has passed). */
-export async function purgeStaging(stagingDir) {
-  const entries = await fs.readdir(stagingDir).catch(() => []);
+/**
+ * Remove everything in the staging dir (used once the deadline has passed).
+ * @param {string} stagingDir
+ * @param {{ keep?: string[] }} [options] entry names to leave alone (e.g. importing/ while
+ *   the import queue is still working through it)
+ */
+export async function purgeStaging(stagingDir, { keep = [] } = {}) {
+  const entries = (await fs.readdir(stagingDir).catch(() => [])).filter((n) => !keep.includes(n));
   await Promise.all(
     entries.map((name) => fs.rm(path.join(stagingDir, name), { recursive: true, force: true })),
   );

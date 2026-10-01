@@ -7,7 +7,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import * as tus from 'tus-js-client';
-import { login, startServer, TMP_ROOT } from './helpers/server.js';
+import { login, PASSWORD, startServer, TMP_ROOT } from './helpers/server.js';
 
 // 1x1 transparent PNG.
 const PNG = Buffer.from(
@@ -89,6 +89,31 @@ describe('open gateway', () => {
     expect(ok.res.headers.get('set-cookie')).toMatch(/HttpOnly/i);
     const session = await fetch(`${srv.baseUrl}/api/session`, { headers: { Cookie: ok.cookie } });
     expect(await session.json()).toMatchObject({ authenticated: true });
+  });
+
+  it('requires a usable nickname and does not count it as a failed attempt', async () => {
+    for (const nickname of ['', '   ', 'x'.repeat(21), null]) {
+      const res = await login(srv.baseUrl, PASSWORD, nickname);
+      expect(res.res.status).toBe(400);
+      expect(await res.res.json()).toEqual({ error: 'bad_nickname' });
+    }
+    for (let i = 0; i < 5; i += 1) await login(srv.baseUrl, PASSWORD, '');
+    const ok = await login(srv.baseUrl, PASSWORD, '  花子\u202E ');
+    expect(ok.res.status).toBe(200);
+    const session = await fetch(`${srv.baseUrl}/api/session`, { headers: { Cookie: ok.cookie } });
+    expect(await session.json()).toMatchObject({
+      authenticated: true,
+      nickname: '花子',
+      importing: false,
+    });
+  });
+
+  it('lists no import status in the speed-test mode', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const res = await fetch(`${srv.baseUrl}/api/uploads`, { headers: { Cookie: cookie } });
+    expect(await res.json()).toEqual({ uploads: [] });
+    const anonymous = await fetch(`${srv.baseUrl}/api/uploads`);
+    expect(anonymous.status).toBe(401);
   });
 
   it('rejects malformed login bodies with 400', async () => {

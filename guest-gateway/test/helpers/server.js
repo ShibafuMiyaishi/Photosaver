@@ -10,10 +10,15 @@ import { loadConfig } from '../../src/config.js';
 
 export const TMP_ROOT = path.resolve(import.meta.dirname, '../../../tmp/test-output/guest-gateway');
 export const PASSWORD = 'correct horse battery';
+export const NICKNAME = 'テスト太郎';
 
 let cachedHash;
 
-export async function startServer(overrides = {}) {
+/**
+ * @param {object} [overrides] config fields to replace
+ * @param {Parameters<typeof createApp>[1]} [deps] store/importer for import mode
+ */
+export async function startServer(overrides = {}, deps = {}) {
   cachedHash ??= await hashPassword(PASSWORD);
   const stagingDir = path.join(TMP_ROOT, crypto.randomUUID());
   await fs.mkdir(stagingDir, { recursive: true });
@@ -28,7 +33,7 @@ export async function startServer(overrides = {}) {
     }),
     ...overrides,
   };
-  const { app, tusServer } = createApp(config);
+  const { app, tusServer } = createApp(config, deps);
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -45,11 +50,11 @@ export async function startServer(overrides = {}) {
   };
 }
 
-export async function login(baseUrl, password = PASSWORD) {
+export async function login(baseUrl, password = PASSWORD, nickname = NICKNAME) {
   const res = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'guest-gateway' },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ password, nickname }),
   });
   const setCookie = res.headers.get('set-cookie') ?? '';
   return { res, cookie: setCookie.split(';')[0] };

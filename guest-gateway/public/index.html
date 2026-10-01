@@ -13,6 +13,15 @@
 
       <section id="login" hidden>
         <form id="login-form">
+          <label for="nickname">ニックネーム(誰が撮ったか分かるように)</label>
+          <input
+            id="nickname"
+            name="nickname"
+            type="text"
+            maxlength="20"
+            autocomplete="nickname"
+            required
+          />
           <label for="password">合言葉</label>
           <input
             id="password"
@@ -27,6 +36,7 @@
       </section>
 
       <section id="uploader" hidden>
+        <p id="greeting" class="greeting"></p>
         <p class="notice" role="status">
           アップロード中は<strong>この画面を開いたまま</strong>にしてください。<br />
           画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。
