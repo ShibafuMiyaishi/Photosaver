@@ -71,6 +71,20 @@ let onLineUnreliable = false;
 // Set when an upload failed while offline: the queue then waits for 'online' (or 再試行)
 // instead of failing item after item. Starting is never blocked on navigator.onLine alone.
 let offlinePause = false;
+const OFFLINE_CHECK_MS = 10_000;
+
+let offlineCheckTimer = null;
+
+/** Backstop for a missed 'online' event: while paused, look again every few seconds. */
+function scheduleOfflineCheck() {
+  clearTimeout(offlineCheckTimer);
+  offlineCheckTimer = setTimeout(() => {
+    offlineCheckTimer = null;
+    if (!offlinePause) return;
+    if (isOffline()) scheduleOfflineCheck();
+    else requeueFailed('待機中(通信が戻ったので再開)');
+  }, OFFLINE_CHECK_MS);
+}
 
 /** navigator.onLine is only trustworthy when it says false (no network at all). */
 function isOffline() {
@@ -356,8 +370,10 @@ function createUpload(item) {
         item.status = 'error';
         if (status === 401) requireLogin();
         // Offline: no timer; pause the queue until 'online' (or 再試行) resumes it.
-        else if (isOffline()) offlinePause = true;
-        else scheduleAutoRetry(item);
+        else if (isOffline()) {
+          offlinePause = true;
+          scheduleOfflineCheck();
+        } else scheduleAutoRetry(item);
         updateItem(item, failedText(item));
       }
       finish();
