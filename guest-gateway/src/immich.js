@@ -25,7 +25,10 @@ export function isUuid(value) {
 }
 
 function toIso(ms) {
-  const date = new Date(Number(ms));
+  // null, '', 0, NaN and negatives would turn into 1970 or an invalid date: treat them as missing.
+  const n = Number(ms);
+  const date = new Date(Number.isFinite(n) && n > 0 ? n : NaN);
+  // Out-of-range values (> year 275760) are also invalid dates.
   return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
 }
 
@@ -36,6 +39,7 @@ function toIso(ms) {
  *   deleteApiKey?: string,
  *   fetchImpl?: typeof fetch,
  *   timeoutMs?: number,
+ *   uploadTimeoutMs?: number,
  * }} options
  */
 export function createImmichClient({
@@ -44,10 +48,15 @@ export function createImmichClient({
   deleteApiKey,
   fetchImpl = fetch,
   timeoutMs = 30_000,
+  uploadTimeoutMs = 30 * 60_000,
 }) {
   const root = new URL('/api/', baseUrl);
 
-  async function request(op, path, { method = 'GET', auth, json, body, signal, timeout = true }) {
+  async function request(
+    op,
+    path,
+    { method = 'GET', auth, json, body, signal, timeout = timeoutMs },
+  ) {
     const headers = {};
     if (auth === 'share') {
       if (!shareKey) throw new ImmichError(op, 0);
@@ -59,14 +68,14 @@ export function createImmichClient({
     }
     if (json !== undefined) headers['content-type'] = 'application/json';
 
-    const signals = [signal, timeout ? AbortSignal.timeout(timeoutMs) : undefined].filter(Boolean);
+    const signals = [signal, AbortSignal.timeout(timeout)].filter(Boolean);
     let res;
     try {
       res = await fetchImpl(new URL(path, root), {
         method,
         headers,
         body: json !== undefined ? JSON.stringify(json) : body,
-        signal: signals.length ? AbortSignal.any(signals) : undefined,
+        signal: AbortSignal.any(signals),
         redirect: 'error',
       });
     } catch {
@@ -101,7 +110,13 @@ export function createImmichClient({
      *   signal?: AbortSignal }} file
      */
     async uploadAsset({ filePath, filename, mime, lastModified, signal }) {
-      const blob = await openAsBlob(filePath, { type: mime || 'application/octet-stream' });
+      let blob;
+      try {
+        blob = await openAsBlob(filePath, { type: mime || 'application/octet-stream' });
+      } catch {
+        // fs errors carry the staging path; never let it reach callers or logs.
+        throw new ImmichError('upload', 0);
+      }
       const form = new FormData();
       const when = toIso(lastModified);
       // Do NOT send x-immich-checksum: that path short-circuits before the album add.
@@ -109,13 +124,14 @@ export function createImmichClient({
       form.append('fileCreatedAt', when);
       form.append('fileModifiedAt', when);
       form.append('filename', filename);
-      // Large videos over a local link: no fixed timeout, the caller may abort via signal.
+      // Large videos over a local link: no short per-request timeout, only an overall cap
+      // (uploadTimeoutMs) combined with the caller's optional signal.
       const res = await request('upload', 'assets', {
         method: 'POST',
         auth: 'share',
         body: form,
         signal,
-        timeout: false,
+        timeout: uploadTimeoutMs,
       });
       const data = await readJson('upload', res);
       if (!UPLOAD_STATUSES.has(data?.status) || !isUuid(data?.id)) {
@@ -151,7 +167,12 @@ export function createImmichClient({
       return { items, nextCursor: data?.assets?.nextCursor ?? null };
     },
 
-    /** Move assets to the event user's trash (recoverable by the owner). */
+    /**
+     * Move assets to the event user's trash (recoverable by the owner). The gateway never sends
+     * `force`, but Immich's `asset.delete` permission also allows `force: true` deletes and
+     * `POST /trash/empty`: a leaked delete key can permanently delete every asset the event
+     * user owns. Keep it server-side only.
+     */
     async deleteAssets(ids) {
       if (!Array.isArray(ids) || ids.length === 0 || !ids.every(isUuid)) {
         throw new ImmichError('delete', 0);

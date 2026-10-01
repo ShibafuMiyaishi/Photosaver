@@ -44,11 +44,19 @@ COOKIE_SECURE=false MIN_FREE_GB=1 npm start
 ### 開発用 Immich(結合テスト用)
 
 ```bash
-docker compose -f dev/compose.yml up -d     # 127.0.0.1:2283、データは ../tmp/dev-immich/
+docker compose -f dev/compose.yml up -d     # 127.0.0.1:2283
 # 結合テスト(初回は開発用の管理者も自動で作る。値は開発用のダミー)
 IMMICH_IT_URL=http://127.0.0.1:2283 IMMICH_IT_ADMIN_EMAIL=admin@example.com \
 IMMICH_IT_ADMIN_PASSWORD=dev-admin-password-123 npm test
 docker compose -f dev/compose.yml down      # 停止(データは残る)
+```
+
+データの置き場所: 写真ライブラリは `../tmp/dev-immich/`、Postgres のデータは名前付き Docker ボリューム
+`dev-pgdata`(`tmp/` を消しても残る)。開発用 Immich を完全に初期化するときだけ:
+
+```bash
+docker compose -f dev/compose.yml down -v   # ⚠️ 開発用 DB(ボリューム dev-pgdata)を削除する。開発用のみ
+rm -rf ../tmp/dev-immich                    # ライブラリも消す場合
 ```
 
 確認済みの Immich v3.2.4 の挙動(結合テストで検証): 共有リンク経由のアップロードは重複も含めて
@@ -71,9 +79,16 @@ docker run --rm --network photosaver_default -v /srv/photosaver/guest-gateway:/o
 unset IMMICH_ADMIN_PASSWORD
 ```
 
+- `--expires` は `Z` か `+09:00` のような時差付きの完全な日時で、未来であること(違えば Immich に触る前に中止)
+- 出力ファイルは最初に確保する。既にある・ディレクトリが無い・書き込めない場合は Immich に触る前に中止し、
+  途中で失敗したら出力ファイルは削除される
 - Immich が 3.2.4 未満なら中止する(SVG 経由の脆弱性の修正版が必要)
 - 途中で失敗した場合、作成済みの専用ユーザーが残る。Immich の管理画面で削除してからやり直す
-- `immich.env` の値(共有リンクキー・削除キー・専用ユーザーのパスワード)は表示・コミットしない
+- 専用ユーザーのパスワードはどこにも保存・表示しない(`immich.env` にはメールアドレスだけ)。
+  その専用ユーザーでログインする必要が出たら、Immich の管理画面でパスワードをリセットする
+- `immich.env` の値(共有リンクキー・削除キー)は表示・コミットしない(`guest-gateway/.gitignore` で `*.env` を除外済み)
+- 削除キーの影響範囲: Immich の `asset.delete` 権限は `force: true` の完全削除や `POST /trash/empty` も
+  許すため、漏れると専用ユーザーが所有する全写真・動画を完全に消せる(窓口自身は `force` を送らない)
 
 ## 速度検証版のデプロイ(ミニPC / 自宅PCから SSH で実施)
 

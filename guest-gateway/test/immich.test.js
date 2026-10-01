@@ -104,6 +104,57 @@ describe('createImmichClient', () => {
     await expect(broken.uploadAsset(upload)).rejects.toBeInstanceOf(ImmichError);
   });
 
+  it('falls back to now for missing or non-positive lastModified', async () => {
+    fake = await startFake((_req, res) => json(res, 201, { status: 'created', id: ASSET }));
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    for (const lastModified of [null, 0, '', NaN, -5]) {
+      await client.uploadAsset({
+        filePath: file,
+        filename: 'a.png',
+        mime: 'image/png',
+        lastModified,
+      });
+    }
+    expect(fake.requests).toHaveLength(5);
+    const year = String(new Date().getUTCFullYear());
+    for (const req of fake.requests) {
+      const body = req.body.toString('latin1');
+      expect(body).not.toContain('1970-01-01');
+      expect(body).toContain(`${year}-`);
+    }
+  });
+
+  it('maps unreadable upload files to ImmichError without the path', async () => {
+    fake = await startFake((_req, res) => json(res, 201, { status: 'created', id: ASSET }));
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    const missing = path.join(TMP_ROOT, `missing-${crypto.randomUUID()}.png`);
+    const err = await client
+      .uploadAsset({ filePath: missing, filename: 'a.png', mime: 'image/png' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBe(0);
+    expect(err.message).not.toContain(missing);
+    expect(err.message).not.toMatch(/ENOENT|test-output/);
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('caps uploads with uploadTimeoutMs', async () => {
+    // Answers far later than the cap: only the overall upload cap can end the request in time.
+    fake = await startFake((_req, res) =>
+      setTimeout(() => json(res, 201, { status: 'created', id: ASSET }), 1_500),
+    );
+    const client = createImmichClient({
+      baseUrl: fake.baseUrl,
+      shareKey: 'k',
+      uploadTimeoutMs: 200,
+    });
+    const err = await client
+      .uploadAsset({ filePath: file, filename: 'a.png', mime: 'image/png' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBe(0);
+  });
+
   it('never leaks Immich error bodies', async () => {
     fake = await startFake((_req, res) => {
       res.writeHead(500, { 'content-type': 'text/plain' });

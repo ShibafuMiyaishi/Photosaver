@@ -1,10 +1,13 @@
 # guest-gateway/dev/compose.yml
 # 開発用の Immich(Mac のローカル Docker 専用。本番には使わない)。
 # 本番と同じ v3.2.4 に固定し、機械学習コンテナは省く(アップロード・一覧・削除の確認には不要)。
-# データはリポジトリ直下の tmp/dev-immich/ に置く(gitignore 対象)。
+# 写真ライブラリはリポジトリ直下の tmp/dev-immich/ に置く(gitignore 対象)。
+# Postgres のデータは名前付き Docker ボリューム dev-pgdata にあり、tmp/ を消しても残る。
 #
 #   docker compose -f guest-gateway/dev/compose.yml up -d
 #   docker compose -f guest-gateway/dev/compose.yml down        # 停止(データは残る)
+#   docker compose -f guest-gateway/dev/compose.yml down -v     # 完全リセット(開発用のみ)
+#     ⚠️ -v は開発用 DB(ボリューム dev-pgdata)を削除する。ライブラリも消すなら tmp/dev-immich/ も削除
 #
 # 起動後の初期設定は guest-gateway/README.md の「開発用 Immich」を参照。
 
