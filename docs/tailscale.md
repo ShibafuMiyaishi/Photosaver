@@ -65,6 +65,10 @@ IPP だけを公開する定石構成):
   帯域制限あり(非公開値)のため単発のリンク共有向け
 - 現構成への追加はコンテナ 1 つ + `tailscale funnel` 1 コマンドで、既存部分の変更は不要
 
+イベントで**ゲストにアップロードしてもらう**用途は、IPP ではなく自作の窓口で対応する
+(専用ノード `tag:wedding-gw` で Funnel 公開): [guest-gateway.md](guest-gateway.md)。
+⚠️ ミニPC本体で `tailscale funnel reset` / `serve reset` を実行すると Immich の tailnet 公開も消えるので使わない。
+
 ## トラブルシューティング
 
 | 症状 | 確認 |

@@ -26,6 +26,7 @@ unless the user explicitly changes this policy.
 | Path | Status | Contents |
 |---|---|---|
 | `server/` | **ACTIVE** | Production compose for the mini PC (Immich v3, mount-guard, QSV) |
+| `guest-gateway/` | **IN DEVELOPMENT** | Public guest-upload app for events (spec: `docs/guest-gateway.md`, rules: `.claude/rules/guest-gateway.md`) |
 | `docs/` | **ACTIVE** | Japanese docs: hardware, setup, migration, operations, tailscale |
 | `docs/legacy/` | archive | Old Windows/album-guard era docs |
 | `album-guard/` | **FROZEN** | Custom auth proxy. Do not extend. Tests/CI may still run |
@@ -53,6 +54,10 @@ unless the user explicitly changes this policy.
   request cap breaks mobile video backup — verified 2026-08), do not propose Funnel
   for the Immich API. If public sharing is ever needed, the approved pattern is
   Immich Public Proxy behind Tailscale Funnel (read-only, share-links only).
+- **Exception (approved 2026-10)**: `guest-gateway` may be exposed via Tailscale Funnel,
+  time-limited per event, on its OWN tagged Tailscale node (`tag:wedding-gw`) in a separate
+  compose project. It holds only an album shared-link key and a delete-only API key; Immich
+  stays tailnet-only. Never `tailscale funnel reset` / `serve reset` on the host.
 - **Docs are curated**: human-facing docs live in `docs/` in Japanese. Don't create
   new doc files unless asked. When changing `server/`, update the matching doc
   (`new-server-setup.md` or `operations.md`) in the same commit.
@@ -76,6 +81,18 @@ unless the user explicitly changes this policy.
   Human-facing files (`README.md`, `docs/`, UI text) in Japanese.
   Code comments default to English; Japanese for domain-specific context.
 
+## Two machines (Mac ⇄ home PC)
+
+- **Mac (work laptop)**: development only — code, local Docker/dev Immich, tests, docs.
+  No SSH to the mini PC, no tailnet, no server secrets.
+- **Home PC**: can SSH to the mini PC on the same LAN — deploys, ops, measurements,
+  guiding the user through the Tailscale admin console.
+- They hand work over through git: **`.claude/handoff/`** (protocol in its README, open
+  tasks in `tasks.md`, results in `reports/`). On the home PC, `git pull` and read
+  `.claude/handoff/tasks.md` when the user asks to continue server-side work.
+- **This repo is public** — never commit tailnet names, `*.ts.net` hostnames, IPs, keys,
+  policy files, or personal info about events/guests.
+
 ## When to read which doc
 
 - Buying/replacing hardware → `docs/hardware.md`
@@ -84,6 +101,7 @@ unless the user explicitly changes this policy.
 - Component responsibilities / design decisions → `docs/architecture.md`
 - Updates, capacity, user management, incidents → `docs/operations.md`
 - Tailscale plans, friend invites, serve/Funnel → `docs/tailscale.md`
+- Event guest uploads (guest-gateway) → `docs/guest-gateway.md`
 
 ## Subagents
 

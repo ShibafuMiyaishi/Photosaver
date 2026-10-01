@@ -50,6 +50,7 @@ Photosaver/
 4. 📐 [システム構成と設計判断](docs/architecture.md)
 5. 🔁 [日常運用(月次更新・容量管理・トラブル対応)](docs/operations.md)
 6. 🌐 [Tailscale 詳細(友達の招待手順・既知の制約)](docs/tailscale.md)
+7. 📤 [ゲスト用アップロード窓口(イベント用・開発中)](docs/guest-gateway.md)
 
 ## album-guard について(凍結)
 
