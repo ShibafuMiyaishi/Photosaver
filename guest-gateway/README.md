@@ -94,7 +94,9 @@ unset IMMICH_ADMIN_PASSWORD
 - 専用ユーザーのパスワードはどこにも保存・表示しない(`immich.env` にはメールアドレスだけ)。
   その専用ユーザーでログインする必要が出たら、Immich の管理画面でパスワードをリセットする
 - `immich.env` の値(共有リンクキー・削除キー)は表示・コミットしない(`guest-gateway/.gitignore` で `*.env` を除外済み)
-- `/srv/photosaver/guest-gateway` は uid 1000 が書き込める必要がある(コンテナは node ユーザーで動く)
+- コンテナは uid 1000(node)で動き、書き出した `immich.env` は uid 1000 の権限 600 になる。compose を
+  実行するミニPCのユーザーも uid 1000 であること(`id -u` が 1000。Ubuntu の最初のユーザーは通常そう)。
+  違う場合はここで止めて相談する
 - 削除キーの影響範囲: Immich の `asset.delete` 権限は `force: true` の完全削除や `POST /trash/empty` も
   許すため、漏れると専用ユーザーが所有する全写真・動画を完全に消せる(窓口自身は `force` を送らない)
 
@@ -174,7 +176,7 @@ docker compose -p wedding-gw down
 2. 窓口を作り直す(`immich.env` を読み込ませる):
    ```bash
    docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml \
-     --env-file /srv/photosaver/guest-gateway/.env up -d --force-recreate guest-gateway
+     --env-file /srv/photosaver/guest-gateway/.env up -d --build --force-recreate guest-gateway
    docker compose -p wedding-gw logs --tail 20 guest-gateway   # immich_ok(version 3.2.4 以上)を確認
    ```
 3. スマホから1枚上げ、画面に「アルバムに追加しました」と出て、Immich のアルバムに入ることを確認する

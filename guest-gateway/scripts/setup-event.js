@@ -226,7 +226,9 @@ export async function runCli(argv, env, { fetchImpl = fetch, log = console.log }
       `IMMICH_ALBUM_ID=${result.albumId}`,
       `IMMICH_SHARE_KEY=${result.shareKey}`,
       `IMMICH_DELETE_API_KEY=${result.deleteApiKey}`,
-      `EVENT_USER_EMAIL=${result.eventEmail}`,
+      // A comment, not a variable: the file is loaded into the public gateway's environment,
+      // which does not need the address.
+      `# event user: ${result.eventEmail}`,
       '',
     ];
     await handle.writeFile(lines.join('\n'));

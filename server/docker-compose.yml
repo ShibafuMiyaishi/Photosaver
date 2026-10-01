@@ -102,7 +102,7 @@ services:
 
 networks:
   # 内部ネットワーク(外部への出口なし)。guest-gateway の compose が external として参加する。
-  # このスタックの down で消えるため、その後は窓口も再起動する
+  # 窓口が止まっている状態でこのスタックを down すると消える。窓口は必ず Immich の後に起動する
   gw:
     name: photosaver_gw
     internal: true

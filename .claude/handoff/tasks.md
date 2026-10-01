@@ -41,7 +41,9 @@ Run over SSH, read-only. Do not change anything in this task.
    (Known doc inconsistency: setup doc creates the marker at `/mnt/photo/`, but `mount-guard`
    mounts `${UPLOAD_LOCATION}` and tests `/data/.photosaver.mount-ok`, i.e. inside
    `immich-library/`. Just report; do not fix.)
-7. Host: `nproc`, `free -h`, `uptime`, `lsb_release -d`.
+7. Host: `nproc`, `free -h`, `uptime`, `lsb_release -d`, and `id -u` of the SSH user
+   (must be 1000: the gateway container runs as uid 1000 and its files are read by compose as
+   this user; report if not).
 8. Repo clone: `git -C /srv/photosaver/repo status -sb` and `git -C /srv/photosaver/repo log -1 --oneline`
    (is it clean and pullable? Do not pull yet).
 
@@ -112,7 +114,7 @@ Report: `reports/YYYY-MM-DD-T2b.md` (pass/fail, no hostnames/IPs). Commit + push
 
 ---
 
-## T3 — Deploy the speed-test build and measure Funnel
+## T3 — Deploy the gateway in speed-test mode and measure Funnel
 
 Status: READY (after T1, T2 and T2b are DONE). Needs the user with phones; ask before starting containers.
 
@@ -180,7 +182,7 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
 2. Follow **`guest-gateway/README.md` → 「イベント用の Immich 準備(本番)」**: the user types the Immich
    admin password (`read -rs`), run `scripts/setup-event.js` on `--network photosaver_gw` with
    `--out /out/immich.env`. Verify only `ls -l /srv/photosaver/guest-gateway/immich.env` (mode 600)
-   and `grep -c '^IMMICH_' immich.env` → 3. Never print the file.
+   and `grep -c '^IMMICH_' /srv/photosaver/guest-gateway/immich.env` → 3. Never print the file.
 3. Follow **「取り込みモードに切り替える」**: recreate `guest-gateway`, check the log shows `immich_ok`
    with version >= 3.2.4.
 4. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →

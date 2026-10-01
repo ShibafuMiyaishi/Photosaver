@@ -152,7 +152,8 @@ describe('runCli', () => {
     expect(content).toContain(`IMMICH_ALBUM_ID=${ALBUM}`);
     expect(content).toContain('IMMICH_SHARE_KEY=share-key-xyz');
     expect(content).toContain('IMMICH_DELETE_API_KEY=delete-key-xyz');
-    expect(content).toContain('EVENT_USER_EMAIL=event@example.com');
+    expect(content).toContain('# event user: event@example.com');
+    expect(content).not.toMatch(/^EVENT_USER_EMAIL=/m);
     expect(content).not.toMatch(/PASSWORD/);
     expect(content).not.toContain(eventPassword);
     expect(content).not.toContain(ADMIN_PASSWORD);

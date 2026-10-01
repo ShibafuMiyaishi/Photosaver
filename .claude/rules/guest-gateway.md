@@ -38,7 +38,8 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 
 - `photosaver_gw` is declared in `server/docker-compose.yml` (delta 5: `internal: true`, only
   `immich-server` joins). Redis and Postgres must never join it — the gateway is public-facing
-  and must reach nothing but the Immich API (owner decision 2026-10-01). Do not switch the
+  and, inside the Immich stack, must reach only the immich-server API (owner decision 2026-10-01).
+  It still has internet/LAN egress through the sidecar's own default network (needed by Tailscale). Do not switch the
   gateway to `photosaver_default`.
 - Import settings come from `${GW_DATA_DIR}/immich.env` (written by `scripts/setup-event.js`,
   loaded via `env_file` with `required: false`); without it the gateway runs in speed-test mode.

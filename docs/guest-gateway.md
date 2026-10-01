@@ -42,7 +42,9 @@ Immich のアカウントも Tailscale も持っていない**イベントのゲ
 ```
 
 - 窓口と Immich をつなぐ `photosaver_gw` は、Immich 本体の compose(`server/docker-compose.yml`)が作る
-  外部への出口のない内部ネットワーク。窓口が乗っ取られても、届くのは Immich の API だけにとどまる
+  外部への出口のない内部ネットワーク。窓口が乗っ取られても、Immich 一式の中で届くのは
+  immich-server の API だけ(Redis・Postgres には届かない)。窓口自体は Tailscale のために
+  インターネットへは出られる
 
 - ミニPC本体とは**別の Tailscale ノード**として公開する。URL にポート番号が付かず、
   ミニPC(Immich)のホスト名も出ない

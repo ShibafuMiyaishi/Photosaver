@@ -47,8 +47,9 @@ docker compose ps                             # healthy 確認
 ```
 
 - `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)
-- 内部ネットワーク `photosaver_gw`(guest-gateway 用)はこの compose が作る。Immich 側を
-  `docker compose down` すると消えるので、その後に窓口を使うときは窓口も `up -d` し直す
+- 内部ネットワーク `photosaver_gw`(guest-gateway 用)はこの compose が作る。窓口が動いている間は
+  Immich 側を `docker compose down` しても残るが、窓口が止まっていれば消える。窓口は必ず Immich の
+  **後に**起動する(先に起動すると `photosaver_gw ... could not be found` で失敗する)
 
 ## 容量管理
 
