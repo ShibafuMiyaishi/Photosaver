@@ -69,7 +69,8 @@ unless the user explicitly changes this policy.
   time-limited per event, on its OWN tagged Tailscale node (`tag:wedding-gw`) in a separate
   compose project. It holds only an album shared-link key and a delete-only API key; Immich
   stays tailnet-only. Never `tailscale funnel reset` / `serve reset` on the host — the kill
-  switch is `docker compose -p wedding-gw down`.
+  switch is `cd ~ && docker compose -p wedding-gw down` (run `-p wedding-gw`
+  commands from a directory without a compose file, never from `/srv/photosaver`).
 - **Docs are curated**: human-facing docs live in `docs/` in Japanese. Don't create
   new doc files unless asked. When changing `server/`, update the matching doc
   (`new-server-setup.md` or `operations.md`) in the same commit; when changing

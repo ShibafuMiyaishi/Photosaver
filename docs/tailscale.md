@@ -65,7 +65,7 @@ ACL でさらに絞ることも可能だがデフォルトで十分。
   Tags `tag:wedding-gw` の認証キーを発行する(手順は [guest-gateway.md](guest-gateway.md) の準備手順 2)
 - Funnel は Tailscale 1.38.3 以上が必要(窓口のサイドカーは `tailscale/tailscale:v1.102`。ホスト側の版は `.claude/handoff/tasks.md` の T1 で確認)
 - Funnel の帯域上限は非公開のため、イベント前に実機で速度を測って採否を決める
-- 止めるときは `docker compose -p wedding-gw down`。イベント後は窓口ノードの削除・認証キーの失効・
+- 止めるときは `cd ~ && docker compose -p wedding-gw down`。イベント後は窓口ノードの削除・認証キーの失効・
   `nodeAttrs` の funnel 行の削除まで行う
 
 > ⚠️ ミニ PC 本体で `tailscale funnel reset` / `tailscale serve reset` を実行しない。

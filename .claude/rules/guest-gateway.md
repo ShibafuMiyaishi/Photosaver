@@ -50,8 +50,10 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 - Separate compose project under `guest-gateway/` (run with `-p wedding-gw`). Do NOT add it to
   `server/docker-compose.yml` (that file keeps only its listed deltas from upstream; the
   `photosaver_gw` network is the one gateway-related delta).
-- Kill switch: `docker compose -p wedding-gw down`. NEVER suggest `tailscale funnel reset` or
-  `tailscale serve reset` on the host as a way to stop the gateway.
+- Kill switch: `cd ~ && docker compose -p wedding-gw down` (run `-p wedding-gw` commands from a
+  directory without a compose file; in `/srv/photosaver` compose may load the Immich file
+  instead). NEVER suggest `tailscale funnel reset` or `tailscale serve reset` on the host as a
+  way to stop the gateway.
 - Sidecar uses the default userspace networking (`TS_USERSPACE=true`), so the gateway process
   cannot dial tailnet peers directly (inferred from the docker-params doc; verify).
 - Staging for in-progress uploads lives on the photo HDD (e.g. `/mnt/photo/guest-gateway/staging`),

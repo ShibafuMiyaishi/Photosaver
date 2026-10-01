@@ -63,3 +63,6 @@ data/immich-library/
 /Photo/
 # Playwright MCP の出力(スクリーンショット等は tmp/e2e/ へ)
 .playwright-mcp/
+
+# Claude Code の作業用 git worktree(サブエージェントの並列作業)
+.claude/worktrees/

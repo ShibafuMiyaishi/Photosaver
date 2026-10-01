@@ -25,7 +25,9 @@ Run over SSH, read-only. Do not change anything in this task.
    (if that needs auth, use `docker inspect immich_server --format '{{.Config.Image}}'` plus
    `docker image inspect` labels). If older: do NOT upgrade; report it. The upgrade
    procedure is `docs/operations.md` (月次アップデート) and needs user approval.
-2. `docker --version`, `docker compose version`,
+2. `docker --version`, `docker compose version` (**must be >= 2.24**: the gateway compose uses
+   `env_file` with `required: false`; if older, report it and stop — updating the
+   `docker-compose-plugin` package needs user approval),
    `docker ps --format '{{.Names}}\t{{.Status}}'` (all Immich containers healthy?).
 3. Docker networks of the Immich stack: `docker network ls --format '{{.Name}}' | grep photosaver`
    — expected `photosaver_default`; `photosaver_gw` appears only after T2b. Also report whether
@@ -108,8 +110,12 @@ Follow **`docs/operations.md` → 「compose 設定の反映」**:
 2. Show the user `diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml`.
    Expected: only the header comment item 5, the comment lines above `mount-guard` (comment-only),
    the `networks:` block under `immich-server`, and the top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
-3. With approval: `cp` the file, `cd /srv/photosaver && docker compose up -d`, then
-   `docker compose ps` (all healthy) and check that Immich works in the tailnet (open the app).
+3. With approval, follow the operations.md block exactly: back up the current file
+   (`docker-compose.yml.bak`), record `docker inspect -f '{{.Name}} {{.State.StartedAt}}' immich_postgres immich_redis`,
+   `cp` the file, `docker compose config -q && docker compose up -d` (if `config -q` fails, restore
+   the backup and STOP), then `docker compose ps` (all healthy) and check that Immich works in the
+   tailnet (open the app). Run the same `docker inspect` again: the Postgres / Redis start times
+   must be unchanged (only `immich_server` is recreated); report if they changed.
 4. Verify: `docker network inspect photosaver_gw --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}'`
    → `true immich_server ` (only that container until the gateway starts).
 
@@ -143,8 +149,10 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
    check alone does not prove T3 filled anything in), and show `grep '^CLOSES_AT=' .env` to the
    user to confirm the deadline they chose (it is not a secret; the template date is a placeholder).
    Never print or commit the rest of the file.
-4. `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env up -d --build`,
-   then `docker compose -p wedding-gw ps` (`guest_gateway` healthy, `guest_gateway_ts` Up — the sidecar has no healthcheck) and `docker compose -p wedding-gw logs --tail 50`.
+4. Validate first: `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env config -q`
+   (never print the expanded config — it contains secrets). Then
+   `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env up -d --build`,
+   then (from `~`, see the kill-switch note in item 8) `docker compose -p wedding-gw ps` (`guest_gateway` healthy, `guest_gateway_ts` Up — the sidecar has no healthcheck) and `docker compose -p wedding-gw logs --tail 50`.
 5. Exposure checks (from a phone on mobile data, not Wi-Fi):
    - the public gateway URL loads and login works;
    - Immich is still NOT reachable from outside, and still reachable inside the tailnet;
@@ -159,9 +167,18 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
      (files go to `staging/kept/`, see README), then set it back to `false`, restart, and delete
      `/mnt/photo/guest-gateway/staging/kept/` right after the check;
    - the IP shown under 「計測情報」 for phones on mobile data and on one shared Wi-Fi
-     (needed to decide the venue-NAT lockout policy).
+     (needed to decide the venue-NAT lockout policy). **Two phones on different networks must show
+     different addresses** (tailscale v1.102 source: Funnel sets a single `X-Forwarded-For` with the
+     client's address, which `trust proxy = 1` reads). If every phone shows the same address, report
+     it as a blocker: the per-IP login lockout would then be shared by all guests. Phones on one
+     Wi-Fi showing one address is expected; the lockout defaults allow 20 failures / 15 min per
+     address (2-min first lock) and can be tuned with `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES`
+     in `.env` — recommend values in the report.
 7. Pass guide: 1 GB over LTE within 15 min and 5 concurrent uploads without errors.
-8. Kill-switch rehearsal: `docker compose -p wedding-gw down` → public URL fails, Immich in tailnet OK.
+8. Kill-switch rehearsal: `cd ~ && docker compose -p wedding-gw down` → both `guest_gateway` and
+   `guest_gateway_ts` are gone from `docker ps`, the public URL fails, Immich in tailnet OK.
+   (`-p wedding-gw` commands must run from a directory without a compose file; from
+   `/srv/photosaver` compose may load the Immich file instead.)
    Leave it down after the test unless the user says otherwise. Ask the user whether to keep the
    gateway's Tailscale node / auth key / funnel nodeAttr for the event (likely yes) or tear them
    down now (docs/guest-gateway.md 「終了後の後片付け」); record the answer in the report.
@@ -215,6 +232,6 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    - PC: 「ZIP を作成」 → download → the ZIP opens and holds the album. If the album is > 2 GB, open a
      third part while two download → 「混み合っています」 page. Time a 2 GB part over the venue-like
      network (download speed over Funnel was not part of T3).
-6. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
+6. Leave it running or stop it as the user prefers (kill switch: `cd ~ && docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

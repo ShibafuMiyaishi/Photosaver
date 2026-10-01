@@ -124,6 +124,9 @@ Funnel の帯域上限は非公開のため、**実機で測って採否を決�
 
 コマンドはすべてミニPC上(自宅PCから SSH)で実行する。SSH するたびに最初に
 `GW=/srv/photosaver/guest-gateway` を実行しておく(以下のコマンドはこの変数を使う)。
+`docker compose -p wedding-gw ...`(状態確認・ログ・停止)は compose ファイルの無い場所(SSH 直後のホーム `~`)で
+実行する。`/srv/photosaver` で実行すると、Docker Compose のバージョンによっては Immich の compose を読み込み、
+窓口が表示されない・止まらないことがある。
 
 設定(`$GW/.env`)を変えたあとの窓口の作り直し(以下「作り直し」)は次のコマンド。当日はイメージを作り直さない
 (`--build` を付けない)ので、リポジトリの更新が混ざらず、Tailscale のコンテナも止まらない:
@@ -184,7 +187,8 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 
 - `event-status.js` は件数だけを表示する(ニックネーム・ファイル名は出さない)。⚠️ が出たら、表示どおりログを確認する
 - `import_retry` が続く(取り込み待ちが減らない): Immich 本体を確認する(`docker compose -p photosaver ps`)。
-  窓口は受信済みのファイルを保持し、Immich が戻れば自動で取り込みを再開する(約1日は再試行を続ける)
+  ログの `status` が 401・403・404 なら Immich ではなく共有リンク側(アップロード許可を切った・期限切れ・作り直し後の
+  `immich.env`)。窓口は受信済みのファイルを保持し、原因が直れば自動で取り込みを再開する(約1日は再試行を続ける)
 - `import_failed`: Immich がファイルを拒否した、または約1日再試行しても届かなかった。受信したファイルは消さずに
   ステージングの `failed/` に残してある(`import_set_aside_failed` が出た分は `importing/` に残っている)。
   共有リンクの設定変更(アップロード許可を切った・作り直した)でも起きるので、原因を直してから
@@ -241,7 +245,8 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
   合言葉を必要とし、ログイン済みの人はそのまま使える。ログイン済みの人も全員追い出す場合は `SESSION_SECRET` も作り直す
   (全員が再ログインになり、それまでの写真は本人が削除できなくなる)
 - **取り込みに失敗したファイルを戻す**(`event-status.js` に失敗の ⚠️、ログに `import_failed`): 先にログの `status` で
-  原因を確かめて直す(400 なら共有リンクのアップロード許可・期限・作り直し後の `immich.env`、それ以外は Immich 本体)。
+  原因を確かめて直す(401・400 なら共有リンクのアップロード許可・期限・作り直し後の `immich.env`。Immich v3.2.4 はアップロード許可の無い
+  共有リンクに 401 を返す。それ以外は Immich 本体)。
   直さずに戻すと、また失敗して `failed/` に戻る(ファイルは消えない)。
   ```bash
   docker exec guest_gateway node scripts/requeue-failed.js           # 確認のみ: 件数と ID、ファイルが残っているか
@@ -249,7 +254,7 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
   ```
   そのあと「作り直し」(起動時に取り込み待ちの分から取り込む)。`event-status.js` で取り込み待ちが減り、失敗が 0 件に
   なることを確認する。「ファイルなし」と出た分は戻せないので、その人に送り直してもらう
-- **緊急停止**: `docker compose -p wedding-gw down`(外から窓口に届かなくなる。tailnet 内の Immich はそのまま使える)。
+- **緊急停止**: `cd ~ && docker compose -p wedding-gw down`(外から窓口に届かなくなる。tailnet 内の Immich はそのまま使える)。
   受信済みの記録(`$GW/db`)とステージングは残るので、
   `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file $GW/.env up -d`(ビルドなし)で再開すれば取り込み待ちの分から続く
   (⚠️ `tailscale funnel reset` / `tailscale serve reset` は使わない。ミニPC本体で実行すると Immich の tailnet 公開まで消える)
@@ -259,7 +264,7 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 1. 期限を過ぎると窓口は自動で閉じる(ログイン・アップロード・閲覧すべて停止し、受信途中のファイルは削除される。
    受信済みで取り込み待ちの分は取り込みを続ける)。
    `docker exec guest_gateway node scripts/event-status.js` で取り込み待ちが 0 件になったこと(失敗の件数も)を確認してから
-   `docker compose -p wedding-gw down`。失敗が残っていれば、先に「困ったとき」の「取り込みに失敗したファイルを戻す」で
+   `cd ~ && docker compose -p wedding-gw down`。失敗が残っていれば、先に「困ったとき」の「取り込みに失敗したファイルを戻す」で
    取り込む(受付終了後のステージング削除でも `failed/` は消えない)。取り込み待ちが減らない場合はログの `import_retry` と Immich を確認する
    (Immich の停止や共有リンクの期限切れなど。窓口は約1日再試行を続ける)
 2. Tailscale 管理画面: 窓口ノード(`tag:wedding-gw`)を削除、認証キーを失効、`nodeAttrs` の funnel 行を削除

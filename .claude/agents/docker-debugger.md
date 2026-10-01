@@ -82,7 +82,9 @@ that gets committed (handoff reports included). Never print `.env` / `immich.env
   allowed, Funnel attr missing in the policy), `docker exec guest_gateway_ts tailscale status`.
   The host's serve/Funnel config is unrelated to the sidecar.
 - **Never** run `tailscale serve reset` / `tailscale funnel reset` on the host — it removes
-  Immich's tailnet exposure. Stop the gateway with `docker compose -p wedding-gw down`.
+  Immich's tailnet exposure. Stop the gateway with `cd ~ && docker compose -p wedding-gw down`
+  (`-p wedding-gw` commands must run from a directory without a compose file — in `/srv/photosaver`
+  compose may load the Immich file and miss the gateway containers).
 
 ### Immich-db PG errors
 
