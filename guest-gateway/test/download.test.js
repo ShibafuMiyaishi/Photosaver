@@ -244,6 +244,63 @@ describe('ZIP download', () => {
     expect(ctx.immich.infoCalls).toBe(1);
   });
 
+  // Other addresses arrive via X-Forwarded-For (trust proxy = 1, as behind tailscaled's proxy).
+  function planAs(ctx, cookie, ip) {
+    return fetch(`${ctx.srv.baseUrl}/api/download`, {
+      method: 'POST',
+      headers: { Cookie: cookie, ...CSRF, ...(ip ? { 'X-Forwarded-For': ip } : {}) },
+    });
+  }
+  function partAs(ctx, id, n, cookie, ip, method = 'GET') {
+    return fetch(`${ctx.srv.baseUrl}/download/${id}/${n}`, {
+      method,
+      headers: { Cookie: cookie, ...(ip ? { 'X-Forwarded-For': ip } : {}) },
+    });
+  }
+
+  it('caps parallel ZIPs per address (3) and in total (4)', async () => {
+    ctx = await setup();
+    ctx.immich.hold = true;
+    const other = (await login(ctx.srv.baseUrl, PASSWORD, 'はなこ')).cookie;
+    const third = (await login(ctx.srv.baseUrl, PASSWORD, 'じろう')).cookie;
+    const mine = (await (await plan(ctx)).json()).id;
+    const theirs = (await (await planAs(ctx, other)).json()).id;
+    const thirds = (await (await planAs(ctx, third)).json()).id;
+    const open = [
+      await part(ctx, mine, 1),
+      await part(ctx, mine, 2),
+      await partAs(ctx, theirs, 1, other),
+    ];
+    expect(open.map((r) => r.status)).toEqual([200, 200, 200]);
+    // Same address: full although this device has a free slot.
+    const busy = await partAs(ctx, theirs, 2, other);
+    expect(busy.status).toBe(429);
+    expect(await busy.text()).toContain('混み合って');
+    // From elsewhere the last slot is free; then the total is reached.
+    open.push(await partAs(ctx, theirs, 2, other, '203.0.113.7'));
+    expect(open[3].status).toBe(200);
+    expect((await partAs(ctx, thirds, 1, third, '198.51.100.9')).status).toBe(429);
+    for (const release of ctx.immich.releases.splice(0)) release();
+    await Promise.all(open.map((r) => r.text()));
+  });
+
+  it("caps live plans per address, evicting only that address's oldest", async () => {
+    ctx = await setup();
+    const elsewhere = (await login(ctx.srv.baseUrl, PASSWORD, 'とおく')).cookie;
+    const kept = (await (await planAs(ctx, elsewhere, '203.0.113.7')).json()).id;
+    // Every new login is a new device: 51 plans from one address.
+    const plans = [];
+    for (let i = 0; i < 51; i += 1) {
+      const cookie = (await login(ctx.srv.baseUrl, PASSWORD, `pc${i}`)).cookie;
+      plans.push({ cookie, id: (await (await planAs(ctx, cookie)).json()).id });
+    }
+    const head = (p) => partAs(ctx, p.id, 1, p.cookie, null, 'HEAD');
+    expect((await head(plans[0])).status).toBe(404);
+    expect((await head(plans[1])).status).toBe(200);
+    expect((await head(plans[50])).status).toBe(200);
+    expect((await partAs(ctx, kept, 1, elsewhere, '203.0.113.7', 'HEAD')).status).toBe(200);
+  });
+
   it('answers HEAD without building a ZIP', async () => {
     ctx = await setup();
     const { id } = await (await plan(ctx)).json();
