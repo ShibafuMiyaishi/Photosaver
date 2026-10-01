@@ -192,6 +192,8 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
 5. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
    the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,
    and `docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
+   `docker exec guest_gateway node scripts/event-status.js` shows the counts with no ⚠️ line
+   (report only that it ran cleanly, or the warning text — not the counts).
    Upload the same photo again → 「同じ写真が既にアルバムにあります」.
    Open 「みんなの写真」: view, play the video, save a photo (share sheet → Photos), delete the test
    photo (own upload); with the organiser password, delete the test video.
