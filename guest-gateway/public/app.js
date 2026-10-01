@@ -65,9 +65,18 @@ function requireLogin() {
   show('login');
 }
 
+// Some in-app browsers / VPN setups report offline while the network works and never fire
+// 'online'. Once an upload makes progress while navigator.onLine says false, stop trusting it.
+let onLineUnreliable = false;
+
 /** navigator.onLine is only trustworthy when it says false (no network at all). */
 function isOffline() {
-  return navigator.onLine === false;
+  return !onLineUnreliable && navigator.onLine === false;
+}
+
+/** Called when an upload got through: the network works whatever navigator.onLine says. */
+function noteNetworkWorks() {
+  if (navigator.onLine === false) onLineUnreliable = true;
 }
 
 async function api(path, options = {}) {
@@ -295,12 +304,15 @@ function createUpload(item) {
       lastModified: String(item.file.lastModified),
     },
     // Re-selecting the same file after a reload should resume, so avoid volatile fields.
-    fingerprint: async (file) => ['gw', file.name, file.size].join(':'),
+    // lastModified too: iOS can name different photos alike (e.g. image.jpg).
+    fingerprint: async (file) => ['gw', file.name, file.size, file.lastModified].join(':'),
     removeFingerprintOnSuccess: true,
     // tus' default gives up at once while navigator.onLine is false, so one Wi-Fi blip failed
     // the whole queue. Same status rules without that check: RETRY_DELAYS ride out about a
     // minute offline; after that the item fails and the queue waits for 'online'.
     onShouldRetry: (err) => isTransientFailure(err.originalResponse?.getStatus?.()),
+    // A chunk the server confirmed proves the network works (see noteNetworkWorks).
+    onChunkComplete: noteNetworkWorks,
     onProgress(bytesSent, bytesTotal) {
       if (item.startOffset === null) item.startOffset = bytesSent;
       item.el.bar.value = bytesTotal ? (bytesSent / bytesTotal) * 100 : 0;
@@ -310,6 +322,7 @@ function createUpload(item) {
       );
     },
     onSuccess({ lastResponse }) {
+      noteNetworkWorks();
       item.el.bar.value = 100;
       if (importing) {
         item.status = 'importing';
@@ -369,11 +382,11 @@ function finish() {
   next();
 }
 
-function next() {
+function next({ ignoreOffline = false } = {}) {
   if (active) return;
   // Paused rather than failing item after item: 'online' / a new login continue the queue.
   // The wake lock stays on while the guest waits with queued items.
-  if (isOffline() || needsLogin) {
+  if ((!ignoreOffline && isOffline()) || needsLogin) {
     updateSummary();
     return;
   }
@@ -420,7 +433,8 @@ function retry(item) {
   if (item.status !== 'error') return;
   item.autoRetries = 0;
   requeue(item, '待機中');
-  next();
+  // The guest pressed 再試行: try even if navigator.onLine says offline (it can be wrong).
+  next({ ignoreOffline: true });
 }
 
 /** Something changed for the better (screen back, network back, logged in): retry all now. */
@@ -473,17 +487,19 @@ async function loadDiagnostics() {
 }
 
 async function fetchSession() {
-  const res = await api('/api/session', {
-    signal:
-      typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(SESSION_TIMEOUT_MS)
-        : undefined,
-  });
-  if (!res.ok) throw new Error(`session: HTTP ${res.status}`);
-  // A captive portal or proxy page is not JSON: res.json() throws.
-  const session = await res.json();
-  if (!session || typeof session !== 'object') throw new Error('session: unexpected body');
-  return session;
+  // AbortSignal.timeout is missing before Safari 16: fall back to a timer.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SESSION_TIMEOUT_MS);
+  try {
+    const res = await api('/api/session', { signal: controller.signal });
+    if (!res.ok) throw new Error(`session: HTTP ${res.status}`);
+    // A captive portal or proxy page is not JSON: res.json() throws.
+    const session = await res.json();
+    if (!session || typeof session !== 'object') throw new Error('session: unexpected body');
+    return session;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Never rejects: a failure shows the 「読み込めませんでした」 screen with a retry button. */
@@ -613,7 +629,8 @@ $('load-retry').addEventListener('click', () => init());
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (!$('load-error').hidden) {
+  // The closed page replaces the body, so the element may be gone.
+  if ($('load-error')?.hidden === false) {
     init();
     return;
   }
@@ -624,7 +641,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.addEventListener('online', () => {
-  if (!$('load-error').hidden) {
+  // The closed page replaces the body, so the element may be gone.
+  if ($('load-error')?.hidden === false) {
     init();
     return;
   }

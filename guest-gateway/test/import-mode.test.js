@@ -206,3 +206,41 @@ describe('import mode when recording fails', () => {
     expect(await fs.readdir(path.join(srv.stagingDir, IMPORT_DIR_NAME))).toEqual([]);
   });
 });
+
+describe('import mode when the finished file cannot be moved', () => {
+  let srv;
+  beforeEach(async () => {
+    srv = await startServer({}, { store: { add() {} }, importer: { enqueue() {} } });
+    // A plain file where importing/ should be: mkdir fails, as on a broken disk.
+    await fs.writeFile(path.join(srv.stagingDir, IMPORT_DIR_NAME), '');
+  });
+  afterEach(async () => {
+    await srv.close();
+  });
+
+  it('drops the upload so a retry sends the file again instead of reporting success', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const { upload, result } = await new Promise((resolve) => {
+      const up = new tus.Upload(PNG, {
+        endpoint: `${srv.baseUrl}/files/`,
+        headers: { ...CSRF, Cookie: cookie },
+        metadata: { filename: 'IMG_0004.png', filetype: 'image/png' },
+        uploadSize: PNG.length,
+        retryDelays: [],
+        onSuccess: () => resolve({ upload: up, result: 'success' }),
+        onError: (err) => resolve({ upload: up, result: err.originalResponse?.getStatus() }),
+      });
+      up.start();
+    });
+    expect(result).toBe(500);
+    // tus' resume check: a leftover complete upload would answer 200 with offset == length.
+    const head = await fetch(new URL(upload.url, srv.baseUrl), {
+      method: 'HEAD',
+      headers: { ...CSRF, Cookie: cookie, 'Tus-Resumable': '1.0.0' },
+    });
+    expect(head.status).toBe(404);
+    const id = new URL(upload.url, srv.baseUrl).pathname.split('/').pop();
+    const left = await fs.readdir(srv.stagingDir);
+    expect(left.filter((name) => name.startsWith(id))).toEqual([]);
+  });
+});

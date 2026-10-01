@@ -137,8 +137,10 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
    `addProxyForwardedHeaders`, Go `ReverseProxy.Rewrite`) drops incoming `X-Forwarded-For` and sets
    it to the single source address — for Funnel the `Tailscale-Ingress-Src` the relay reported
    (source-read 2026-10-01; still confirm with `/api/whoami` in the speed test).
-7. Cookie `__Host-sid`: HttpOnly, Secure, Path=/, SameSite=Lax, HMAC-signed `{deviceId, nickname, role, exp}`.
-   CSRF: exact `Origin` match + reject `Sec-Fetch-Site: cross-site` + required custom header on mutations.
+7. Cookie `__Host-gw` (`gw` when `COOKIE_SECURE=false` for local http): HttpOnly, Secure, Path=/,
+   SameSite=Lax, HMAC-signed `{deviceId, nickname, role, exp}`.
+   CSRF: reject `Sec-Fetch-Site: cross-site` + required custom header `X-Requested-With` on mutations
+   (a cross-origin request carrying it needs a CORS preflight, which is never answered).
 8. helmet with CSP `'self'` (+ `blob:`/`data:` for img/media), `Referrer-Policy: no-referrer`,
    `X-Robots-Tag: noindex, nofollow, noarchive`, `robots.txt` Disallow all.
 9. Logs: method, route, status, duration, short hash of deviceId. Never keys, cookies, passwords.
@@ -185,7 +187,7 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 - No `capture` attribute (iOS opens camera only). `accept="image/*,video/*"` — do NOT list `image/heic`.
 - iOS suspends the page on lock/app switch → tus resume on `visibilitychange`, Screen Wake Lock,
   persistent "keep this screen open" banner. tus `chunkSize` 50 MB (keeps Cloudflare fallback viable),
-  long `retryDelays`, fingerprint = name+size+deviceId, `removeFingerprintOnSuccess: true`.
+  long `retryDelays`, fingerprint = name+size+lastModified (per-device localStorage), `removeFingerprintOnSuccess: true`.
 - Upload failures (`public/upload-retry.js`): tus' default `onShouldRetry` gives up at once while
   `navigator.onLine` is false, so ours keeps its status rules without that check. Transient
   (network, 5xx but 507, 408/409/423/429) → re-queued automatically while visible (5 s → 60 s cap,
