@@ -12,9 +12,10 @@ import { log } from './log.js';
 const PERMANENT_STATUSES = new Set([400, 413, 415, 422]);
 // Network errors, 5xx, 429 and 401/403/404 (key, link or album misconfigured: fixable by the
 // admin, then picked up again) are retried with these delays; the last one repeats.
-const DEFAULT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000];
-// About 1.5 hours of retries with the default delays.
-const DEFAULT_MAX_ATTEMPTS = 20;
+export const DEFAULT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000];
+// About a day of retries with the default delays: giving up deletes the guest's file, so an
+// Immich outage during the event (or overnight after it) must not run this out.
+export const DEFAULT_MAX_ATTEMPTS = 300;
 // tus ids are random hex; anything else must never be joined into a path.
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 

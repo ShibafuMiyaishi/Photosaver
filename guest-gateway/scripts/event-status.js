@@ -32,6 +32,7 @@ export function formatBytes(bytes) {
 }
 
 function formatDuration(ms) {
+  if (ms < 60_000) return '1分未満';
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 60) return `${minutes}分`;
   const hours = Math.floor(minutes / 60);
@@ -64,18 +65,22 @@ export function formatStatus(stats, { now, closesAt, freeBytes }) {
   if (stats.oldestPendingAt !== null && now - stats.oldestPendingAt > STUCK_PENDING_MS) {
     warnings.push(
       `取り込み待ちが${formatDuration(now - stats.oldestPendingAt)}以上残っています。` +
-        'ログの import_retry / immich_unreachable を確認してください',
+        'Immich が止まっていないか確認してください(ログの import_retry)',
     );
   }
   if (stats.byStatus.failed.count > 0) {
-    warnings.push('取り込みに失敗したファイルがあります。ログの import_failed を確認してください');
+    warnings.push(
+      '取り込みに失敗したファイルがあります(受信したファイルは削除済み)。ログの import_failed を確認してください',
+    );
   }
   return { lines, warnings };
 }
 
 async function main(env) {
   if (!env.DB_PATH) {
-    throw new Error('DB_PATH is not set (run inside the gateway container in import mode)');
+    throw new Error(
+      'DB_PATH is not set (run it inside the gateway container: docker exec guest_gateway node scripts/event-status.js)',
+    );
   }
   let store;
   try {

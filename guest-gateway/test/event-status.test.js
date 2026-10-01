@@ -31,6 +31,9 @@ describe('event status', () => {
       freeBytes: 500 * 1024 ** 3,
     });
     expect(lines).toContain('受付期限まで: あと3時間12分');
+    expect(
+      formatStatus(stats(), { now: NOW, closesAt: NOW + 30_000, freeBytes: null }).lines[0],
+    ).toBe('受付期限まで: あと1分未満');
     expect(lines).toContain('取り込み済み: 120件 (3.0 GB)');
     expect(lines).toContain('投稿した端末: 15台');
     expect(lines).toContain('HDD の空き: 500.0 GB');

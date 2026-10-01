@@ -155,7 +155,7 @@ docker compose -p wedding-gw ps
 docker compose -p wedding-gw logs -f guest-gateway     # 計測ログ(upload_finished に mbps)
 ```
 
-公開 URL は `https://<TS_HOSTNAME>.<tailnet>.ts.net`(`docker exec guest_gateway_ts tailscale status` で確認)。
+公開 URL は `https://<TS_HOSTNAME>.<tailnet>.ts.net`(`docker exec guest_gateway_ts tailscale funnel status` で確認)。
 **URL・tailnet 名はリポジトリや報告に書かない。**
 
 ### 計測で見るもの

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ImmichError } from '../src/immich.js';
-import { createImporter } from '../src/importer.js';
+import { createImporter, DEFAULT_MAX_ATTEMPTS, DEFAULT_RETRY_DELAYS_MS } from '../src/importer.js';
 import { openStore } from '../src/store.js';
 import { TMP_ROOT } from './helpers/server.js';
 
@@ -120,6 +120,14 @@ describe('import queue', () => {
       expect(await exists('u1')).toBe(false);
     },
   );
+
+  it('keeps retrying a transient Immich outage for at least a day by default', () => {
+    let totalMs = 0;
+    for (let attempt = 1; attempt < DEFAULT_MAX_ATTEMPTS; attempt += 1) {
+      totalMs += DEFAULT_RETRY_DELAYS_MS[Math.min(attempt, DEFAULT_RETRY_DELAYS_MS.length) - 1];
+    }
+    expect(totalMs).toBeGreaterThanOrEqual(24 * 60 * 60_000);
+  });
 
   it('gives up after maxAttempts transient failures', async () => {
     let calls = 0;

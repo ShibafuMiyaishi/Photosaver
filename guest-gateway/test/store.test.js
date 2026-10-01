@@ -139,6 +139,7 @@ describe('upload store', () => {
       await fs.rm(`${file}-shm`, { force: true });
     }
   });
+
   it('summarizes counts for the operator, per asset for deletions', () => {
     store.add(ROW);
     store.add({ ...ROW, uploadId: 'u2', size: 100 });
