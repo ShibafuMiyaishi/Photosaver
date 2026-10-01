@@ -6,7 +6,7 @@
 #   docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml \
 #     --env-file /srv/photosaver/guest-gateway/.env up -d --build
 # 緊急停止:
-#   docker compose -p wedding-gw down
+#   cd ~ && docker compose -p wedding-gw down   (compose ファイルの無い場所で実行する)
 #   (ミニPC本体で tailscale funnel reset / serve reset は使わない — Immich の tailnet 公開も消える)
 #
 # Immich へは本体 compose が作る内部ネットワーク photosaver_gw 経由で接続する(immich-server だけが

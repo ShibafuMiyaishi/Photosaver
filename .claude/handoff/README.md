@@ -45,7 +45,8 @@ pass/fail results and sanitized error messages are fine.
 - Read `CLAUDE.md` first. In particular: never `tailscale funnel reset` / `tailscale serve reset`
   (the host's 443 serve publishes Immich to the tailnet), never `docker compose down -v`,
   never touch `server/docker-compose.yml` deltas, never put Postgres on the HDD.
-- Stop the guest-gateway only with `docker compose -p wedding-gw down`.
+- Stop the guest-gateway only with `cd ~ && docker compose -p wedding-gw down` (run `-p wedding-gw`
+  commands from a directory without a compose file, never from `/srv/photosaver`).
 - Never create a mount marker (`.photosaver.mount-ok`) unless `findmnt /mnt/photo` shows the
   HDD mounted and the user agreed — a marker on the bare mountpoint defeats the guard.
 - Do not upgrade Immich, change the Tailscale policy, or create keys without the user's go-ahead.

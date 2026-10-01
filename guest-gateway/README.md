@@ -219,7 +219,10 @@ HDD の空きを表示し、取り込みの詰まりや失敗があれば ⚠️
 ## 停止
 
 ```bash
-docker compose -p wedding-gw down
+cd ~ && docker compose -p wedding-gw down
 ```
+
+`docker compose -p wedding-gw ...`(`ps` / `logs` / `down`)は compose ファイルの無い場所(ホーム `~` など)で実行する。
+`/srv/photosaver` で実行すると、Docker Compose のバージョンによっては Immich の compose を読み込み、窓口を止められない。
 
 ⚠️ ミニPC本体で `tailscale funnel reset` / `tailscale serve reset` は使わない(Immich の tailnet 公開も消える)。

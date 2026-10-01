@@ -41,11 +41,18 @@ docker compose ps    # healthy 確認
 ```bash
 git -C /srv/photosaver/repo pull --ff-only
 diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml   # 何が変わるか確認
+cd /srv/photosaver
+cp docker-compose.yml docker-compose.yml.bak                      # 戻せるように控えを取る
+docker inspect -f '{{.Name}} {{.State.StartedAt}}' immich_postgres immich_redis   # 反映前の起動時刻
 cp /srv/photosaver/repo/server/docker-compose.yml /srv/photosaver/
-cd /srv/photosaver && docker compose up -d    # 変更のあったサービスだけ作り直される(数十秒止まる)
-docker compose ps                             # healthy 確認
+docker compose config -q && docker compose up -d   # 構文確認 → 変更のあったサービスだけ作り直される(数十秒止まる)
+docker compose ps                                  # healthy 確認
+docker inspect -f '{{.Name}} {{.State.StartedAt}}' immich_postgres immich_redis   # 反映前と同じ時刻なら作り直されていない
 ```
 
+- `config -q` がエラーになったら `up` せずに `cp docker-compose.yml.bak docker-compose.yml` で戻す。
+  Postgres / Redis の起動時刻が変わっていたら(差分が `immich-server` だけのはずなのに)作り直されている。
+  データは消えないが、想定外なので差分を見直す
 - `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)。`server/.env.example` に新しい変数が
   増えていたら、`diff` で確認して `.env` に手で追記する
 - `server/scripts/` が変わっていたら同様に `cp` する
@@ -71,7 +78,7 @@ docker system df          # Docker 側の肥大確認
 ### HDD 増設・交換の手順(概要)
 
 1. 新 HDD を Btrfs でフォーマット(new-server-setup.md 手順 6 と同様)し、仮の場所(例: `/mnt/photo-new`)にマウント
-2. 窓口が動いていれば `docker compose -p wedding-gw down`、Immich は `docker compose stop`
+2. 窓口が動いていれば `cd ~ && docker compose -p wedding-gw down`、Immich は `cd /srv/photosaver && docker compose stop`
 3. `rsync -a --info=progress2 /mnt/photo/ /mnt/photo-new/`(`/mnt/photo` 以下を丸ごと。マーカー 2 つも一緒にコピーされる)
 4. fstab の UUID を差し替え、`/mnt/photo` に新 HDD をマウント
 5. マーカー 2 つがあることを確認し、無ければ作る:
@@ -90,7 +97,9 @@ docker system df          # Docker 側の肥大確認
 [guest-gateway.md の「当日の運用」](guest-gateway.md#当日の運用)、デプロイは
 [guest-gateway/README.md](../guest-gateway/README.md) を参照。
 
-- 緊急停止: `docker compose -p wedding-gw down`(tailnet 内の Immich はそのまま使える)
+- 緊急停止: `cd ~ && docker compose -p wedding-gw down`(tailnet 内の Immich はそのまま使える)。
+  `-p wedding-gw` の操作は compose ファイルの無い場所(ホーム `~` など)で実行する。
+  `/srv/photosaver` で実行すると Docker Compose のバージョンによっては Immich の compose を読み込み、窓口を止められない
 - ⚠️ ミニ PC 本体で `tailscale funnel reset` / `tailscale serve reset` は**使わない**
   (Immich の tailnet 公開まで消える)
 - 起動順は Immich → 窓口(上の「compose 設定の反映」参照)

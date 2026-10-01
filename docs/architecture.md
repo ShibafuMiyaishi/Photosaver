@@ -76,7 +76,7 @@ Funnel で外に出るのは窓口ノードだけで、Immich(本体の 443 serv
 - **ネットワーク分離**: 窓口と Immich の接点は `photosaver_gw`(`internal: true`)だけ。
   参加するのは immich-server のみで、Redis・Postgres は決して参加させない
   (`server/docker-compose.yml` 差分 5)。窓口が乗っ取られても届くのは Immich の API だけ
-- 止めるときは `docker compose -p wedding-gw down`。
+- 止めるときは `cd ~ && docker compose -p wedding-gw down`。
   ⚠️ ミニ PC 本体で `tailscale funnel reset` / `serve reset` は使わない(Immich の tailnet 公開まで消える)
 - Funnel の帯域は非公開のため、実機で速度を測ってから採否を決める
   (不合格時の代替候補は [guest-gateway.md](guest-gateway.md) の「速度の事前検証」)
