@@ -27,6 +27,8 @@ jobs:
         working-directory: album-guard
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
@@ -35,7 +37,7 @@ jobs:
           cache-dependency-path: album-guard/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint --if-present
@@ -53,6 +55,8 @@ jobs:
         working-directory: guest-gateway
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # Lets this workflow land on main before guest-gateway/ itself does.
       - name: Detect guest-gateway
