@@ -45,7 +45,7 @@ COOKIE_SECURE=false MIN_FREE_GB=1 npm start
 
 ```bash
 # 1. コードを更新
-git -C /srv/photosaver/repo pull
+git -C /srv/photosaver/repo pull --ff-only
 
 # 2. ディレクトリ(ステージングは写真 HDD 上)
 #    HDD が外れていると /mnt/photo は空のシステムディスク上のディレクトリになり、mkdir すると
@@ -60,7 +60,9 @@ fi
 #    窓口コンテナにもこのマーカーを読み取り専用で渡す(無ければ起動しない・受付も止める)
 
 # 3. .env を作る(権限 600。値は表示・コミットしない)
-install -m 600 /srv/photosaver/repo/guest-gateway/.env.example /srv/photosaver/guest-gateway/.env
+#    既にある .env(Tailscale 認証キーを書き込み済みなど)は上書きしない
+[ -f /srv/photosaver/guest-gateway/.env ] || \
+  install -m 600 /srv/photosaver/repo/guest-gateway/.env.example /srv/photosaver/guest-gateway/.env
 #    TS_AUTHKEY / SESSION_SECRET / GUEST_PASSWORD_HASH / CLOSES_AT を埋める
 #    (MOUNT_MARKER_HOST は上のマーカーのパス。既定値のままでよい)
 openssl rand -hex 32                                         # → SESSION_SECRET
