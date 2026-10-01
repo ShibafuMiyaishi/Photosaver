@@ -119,6 +119,8 @@ docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file $GW/
 ```
 
 作り直しの間(数秒)は送信が一時停止するが、ゲストの画面で自動的に再試行される。ログイン中の人はそのまま使える。
+窓口は Tailscale のコンテナ(`ts`)のネットワークを借りているため、**`ts` が再起動・作り直しされたら、必ずそのあとに窓口も「作り直し」する**
+(しないと、2つとも動いて見えるのに外から届かない)。
 
 ### 前日までのチェック
 
@@ -183,7 +185,7 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 | LINE・Instagram などのアプリ内で開いて、うまく動かない | 右上のメニューから「ブラウザで開く」(Safari / Chrome)で開き直す |
 | 送信が止まった・進まない | 画面を開き直し、同じ写真をもう一度選ぶ → 送信済みの分の続きから再開する。電波の良い場所で |
 | 合言葉を何度か間違えて入れなくなった | 同じ接続元から 15 分で 5 回失敗すると 15 分ロック(繰り返すと長くなり、最長 24 時間)。Wi-Fi ⇄ モバイル回線を切り替えると別の接続元になる。会場 Wi-Fi で多数が巻き込まれた場合は「作り直し」(ロックはメモリ上なので解除される) |
-| 誰も入れない(`login_global_pause`) | 全体で失敗が 100 回を超えると、総当たり対策で 5 分間すべてのログインを止める。5 分待つ。続くなら合言葉が想定外に広まっていないか確認する |
+| 誰も入れない(`login_global_pause`) | 15 分間に全体で 100 回失敗すると、総当たり対策で 5 分間すべてのログインを止める。5 分待つ。続くなら合言葉が想定外に広まっていないか確認する |
 | 削除ボタンが出ない | 削除できるのは**同じスマホ・同じブラウザ**から送り、新しくアルバムに入った写真だけ(別のブラウザ・プライベートブラウズ・Cookie 削除・再ログイン後や、既にアルバムにあった写真の重複は不可)。幹事が管理者の合言葉で入って消す |
 | 「同じ写真が既にアルバムにあります」 | 正常。既に入っているので、もう一度送らなくてよい |
 | 「みんなの写真」に出てこない | 送信直後はアルバムへの追加とサムネイル作成に少し時間がかかる。少し待って「更新」を押す |
@@ -200,10 +202,11 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 - **外から窓口に届かない**: `docker compose -p wedding-gw ps`(2つとも動いているか)、
   `docker exec guest_gateway_ts tailscale funnel status`(Funnel が有効か)、`docker compose -p wedding-gw logs --tail 50 ts`、
   Tailscale 管理画面の Machines で窓口ノードがオンラインか(認証キーの期限切れ・ノードの期限切れ)を確認する。
-  tailnet 内の Immich は影響を受けない
+  2つとも動いているのに届かない場合(特に `ts` が窓口より後に起動し直している場合)は「作り直し」をする
+  (`ts` の再起動で窓口のネットワークが切れているため)。tailnet 内の Immich は影響を受けない
 - **ミニPCが再起動した**: Immich と窓口は自動で起動する。ただし HDD がマウントされていないと窓口は起動しない
   (システムディスクに書き込まないため)。`test -f /mnt/photo/.photosaver.mount-ok && echo ok` で HDD を確認し、
-  `docker compose -p wedding-gw ps` で窓口が止まっていれば「作り直し」、最後に `event-status.js` で取り込み待ちが減っていくことを確認する
+  `docker compose -p wedding-gw ps` で窓口が止まっている、または外から届かなければ「作り直し」、最後に `event-status.js` で取り込み待ちが減っていくことを確認する
 - **期限を延ばす(期限を間違えて既に閉じてしまった場合も同じ)**: `$GW/.env` の `CLOSES_AT` を書き換えて「作り直し」。
   ログイン済みの人の Cookie は元の期限で切れるため、その時点で全員の再ログインが必要になり、それ以前に送った写真は
   本人が削除できなくなる(幹事は削除できる)。既に閉じていた場合、受信途中だったファイルは消えているが、取り込み待ちの分は
@@ -214,7 +217,8 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
   合言葉を必要とし、ログイン済みの人はそのまま使える。ログイン済みの人も全員追い出す場合は `SESSION_SECRET` も作り直す
   (全員が再ログインになり、それまでの写真は本人が削除できなくなる)
 - **緊急停止**: `docker compose -p wedding-gw down`(外から窓口に届かなくなる。tailnet 内の Immich はそのまま使える)。
-  受信済みの記録(`$GW/db`)とステージングは残るので、デプロイ手順の「起動」で再開すれば取り込み待ちの分から続く
+  受信済みの記録(`$GW/db`)とステージングは残るので、
+  `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file $GW/.env up -d`(ビルドなし)で再開すれば取り込み待ちの分から続く
   (⚠️ `tailscale funnel reset` / `tailscale serve reset` は使わない。ミニPC本体で実行すると Immich の tailnet 公開まで消える)
 
 ## 終了後の後片付け
@@ -222,13 +226,14 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 1. 期限を過ぎると窓口は自動で閉じる(ログイン・アップロード・閲覧すべて停止し、受信途中のファイルは削除される。
    受信済みで取り込み待ちの分は取り込みを続ける)。
    `docker exec guest_gateway node scripts/event-status.js` で取り込み待ちが 0 件になったこと(失敗の件数も)を確認してから
-   `docker compose -p wedding-gw down`
+   `docker compose -p wedding-gw down`。取り込み待ちが減らない場合はログの `import_retry` と Immich を確認する
+   (Immich の停止や共有リンクの期限切れなど。窓口は約1日再試行を続ける)
 2. Tailscale 管理画面: 窓口ノード(`tag:wedding-gw`)を削除、認証キーを失効、`nodeAttrs` の funnel 行を削除
 3. Immich: 共有リンクを削除(アルバムと写真は残す)。削除用の API キーを削除
 4. ミニPC(次のイベントでは `setup-event.js` からやり直す):
    ```bash
    rm -f /srv/photosaver/guest-gateway/immich.env              # 共有リンクのキーなど
-   rm -f /srv/photosaver/guest-gateway/db/gateway.db*          # ニックネームの記録(ディレクトリは残す)
+   sudo rm -f /srv/photosaver/guest-gateway/db/gateway.db*     # ニックネームの記録(ディレクトリは残す)
    sudo rm -r /srv/photosaver/guest-gateway/ts-state           # 窓口ノードの Tailscale 状態
    sudo rm -r /mnt/photo/guest-gateway/staging/*               # ステージングの残り(中身だけ)
    ```
