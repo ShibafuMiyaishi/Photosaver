@@ -9,8 +9,10 @@
 #   docker compose -p wedding-gw down
 #   (ミニPC本体で tailscale funnel reset / serve reset は使わない — Immich の tailnet 公開も消える)
 #
-# 速度検証版のため Immich とはまだ接続しない。取り込みを実装する段階で、
-# ts サービスを external network `photosaver_default` に参加させる。
+# Immich へは本体 compose が作る内部ネットワーク photosaver_gw 経由で接続する(immich-server だけが
+# 参加。Redis・Postgres には届かない)。Immich を先に起動しておくこと。
+# イベント用の IMMICH_* は scripts/setup-event.js が書き出す ${GW_DATA_DIR}/immich.env から読む。
+# このファイルが無ければ速度検証モード(受信して削除するだけ)。
 
 name: wedding-gw
 
@@ -31,6 +33,11 @@ services:
       - ${GW_DATA_DIR:?GW_DATA_DIR is required}/ts-state:/var/lib/tailscale
       # TS_SERVE_CONFIG must be mounted as a directory, not a single file.
       - ./ts-config:/config:ro
+    # The gateway shares this network namespace, so these are the gateway's networks too:
+    # default (internet egress for Tailscale) + photosaver_gw (immich-server only).
+    networks:
+      - default
+      - immich
     restart: unless-stopped
 
   guest-gateway:
@@ -51,7 +58,19 @@ services:
       MIN_FREE_GB: ${MIN_FREE_GB:-10}
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
       MOUNT_MARKER: /run/photosaver/mount-ok
+      IMMICH_URL: http://immich-server:2283
+      DB_PATH: /data/db/gateway.db
+    # IMMICH_SHARE_KEY / IMMICH_ALBUM_ID / IMMICH_DELETE_API_KEY (secrets, mode 600).
+    env_file:
+      - path: ${GW_DATA_DIR:?GW_DATA_DIR is required}/immich.env
+        required: false
     volumes:
+      # Upload records (small sqlite on the NVMe). Create it owned by uid 1000 beforehand.
+      - type: bind
+        source: ${GW_DATA_DIR:?GW_DATA_DIR is required}/db
+        target: /data/db
+        bind:
+          create_host_path: false
       # HDD mount marker (exists only on the mounted HDD). Startup fails if it is missing,
       # and the app re-checks it before accepting each upload.
       - type: bind
@@ -68,3 +87,8 @@ services:
         bind:
           create_host_path: false
     restart: unless-stopped
+
+networks:
+  immich:
+    external: true
+    name: photosaver_gw

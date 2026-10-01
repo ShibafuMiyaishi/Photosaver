@@ -27,8 +27,10 @@ Run over SSH, read-only. Do not change anything in this task.
    procedure is `docs/operations.md` (月次アップデート) and needs user approval.
 2. `docker --version`, `docker compose version`,
    `docker ps --format '{{.Names}}\t{{.Status}}'` (all Immich containers healthy?).
-3. Docker network of the Immich stack: `docker network ls --format '{{.Name}}' | grep photosaver`
-   — expected `photosaver_default` (the gateway will join it as an external network).
+3. Docker networks of the Immich stack: `docker network ls --format '{{.Name}}' | grep photosaver`
+   — expected `photosaver_default`; `photosaver_gw` appears only after T2b. Also report whether
+   `/srv/photosaver/docker-compose.yml` differs from `/srv/photosaver/repo/server/docker-compose.yml`
+   (`diff -q`; do not pull or copy).
 4. Tailscale: `tailscale version` (need >= 1.38.3; record the version),
    `tailscale serve status`, `tailscale funnel status`.
    Confirm 443 → `127.0.0.1:2283` is tailnet-only and nothing is funneled.
@@ -89,16 +91,38 @@ Report: `reports/YYYY-MM-DD-T2.md` — which steps are done (no policy text, no 
 
 ---
 
+## T2b — Give the gateway its own network to Immich (restarts immich-server briefly)
+
+Status: READY (after T1). Needs user approval: `immich_server` is recreated (tens of seconds offline).
+
+`server/docker-compose.yml` gained delta 5: `immich-server` also joins the internal network
+`photosaver_gw`, the only network the gateway shares with Immich (Redis/Postgres stay off it).
+Follow **`docs/operations.md` → 「compose 設定の反映」**:
+
+1. `git -C /srv/photosaver/repo pull --ff-only` (stop and report if dirty/diverged).
+2. Show the user `diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml`.
+   Expected: only the header comment item 5, the `networks:` block under `immich-server`, and the
+   top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
+3. With approval: `cp` the file, `cd /srv/photosaver && docker compose up -d`, then
+   `docker compose ps` (all healthy) and check that Immich works in the tailnet (open the app).
+4. Verify: `docker network inspect photosaver_gw --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}'`
+   → `true immich_server ` (only that container until the gateway starts).
+
+Report: `reports/YYYY-MM-DD-T2b.md` (pass/fail, no hostnames/IPs). Commit + push.
+
+---
+
 ## T3 — Deploy the speed-test build and measure Funnel
 
-Status: READY (after T1 and T2 are DONE). Needs the user with phones; ask before starting containers.
+Status: READY (after T1, T2 and T2b are DONE). Needs the user with phones; ask before starting containers.
 
-The code is on main (`guest-gateway/`, merged in PR #2). Follow **`guest-gateway/README.md` →
-「速度検証版のデプロイ」** exactly; it is the source of truth for commands. Key points:
+The code is on main (`guest-gateway/`). Follow **`guest-gateway/README.md` →
+「デプロイ」** exactly; it is the source of truth for commands. Do NOT create `immich.env` in this
+task — without it the gateway runs in speed-test mode (receive, measure, delete). Key points:
 
 1. `git -C /srv/photosaver/repo pull --ff-only` (report and stop if the clone is dirty or diverged).
 2. Directories: only if the HDD marker exists (`test -f /mnt/photo/.photosaver.mount-ok`) create
-   `/srv/photosaver/guest-gateway` and `/mnt/photo/guest-gateway/staging` (chown 1000:1000).
+   `/srv/photosaver/guest-gateway/db` and `/mnt/photo/guest-gateway/staging` (both chown 1000:1000).
    If the marker is missing, STOP and report (T1 item 6 notes a marker-location inconsistency;
    the gateway expects `/mnt/photo/.photosaver.mount-ok` by default, override with
    `MOUNT_MARKER_HOST` in `.env` only after confirming with the user).
@@ -140,3 +164,29 @@ The code is on main (`guest-gateway/`, merged in PR #2). Follow **`guest-gateway
 Report: `reports/YYYY-MM-DD-T3.md` with a measurement table (no URLs, tailnet names or IPs —
 write only whether the shown IP was a public/carrier/shared address), pass/fail per item,
 problems, and a recommendation (Funnel OK / fallback needed). Commit + push.
+
+---
+
+## T4 — Prepare the event in Immich and switch the gateway to import mode
+
+Status: BLOCKED until T3 recommends Funnel (or the user decides on a fallback). Needs the user.
+
+Ask the user for: album name, the dedicated event user's e-mail (a new address used only for
+this; it never receives mail), the gateway deadline `CLOSES_AT` (already in `.env`), and the
+shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never commit these values.
+
+1. `git -C /srv/photosaver/repo pull --ff-only`, rebuild the image
+   (`docker build -t guest-gateway /srv/photosaver/repo/guest-gateway`).
+2. Follow **`guest-gateway/README.md` → 「イベント用の Immich 準備(本番)」**: the user types the Immich
+   admin password (`read -rs`), run `scripts/setup-event.js` on `--network photosaver_gw` with
+   `--out /out/immich.env`. Verify only `ls -l /srv/photosaver/guest-gateway/immich.env` (mode 600)
+   and `grep -c '^IMMICH_' immich.env` → 3. Never print the file.
+3. Follow **「取り込みモードに切り替える」**: recreate `guest-gateway`, check the log shows `immich_ok`
+   with version >= 3.2.4.
+4. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
+   the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,
+   and `docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
+   Upload the same photo again → 「同じ写真が既にアルバムにあります」.
+5. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
+
+Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

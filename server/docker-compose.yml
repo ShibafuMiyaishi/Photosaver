@@ -8,6 +8,9 @@
 #   3. QSV ハードウェアトランスコード有効化(hwaccel.transcoding.yml が必要 —
 #      docs/new-server-setup.md の手順でダウンロードする)
 #   4. DB_STORAGE_TYPE は未設定(DB は内蔵 NVMe に置く前提)
+#   5. immich-server を内部ネットワーク photosaver_gw にも接続(イベント用の guest-gateway が
+#      Immich だけに届くようにする。Redis・Postgres はこのネットワークに入れない。
+#      docs/guest-gateway.md 参照)
 #
 # 起動前に必ず: cp .env.example .env して値を埋める。
 # セットアップ全体: docs/new-server-setup.md / 移行: docs/migration-runbook.md
@@ -42,6 +45,10 @@ services:
     ports:
       # tailscale serve → localhost:2283 で公開するため、ローカルバインドのみ。
       - '127.0.0.1:2283:2283'
+    networks:
+      - default
+      # guest-gateway 専用(差分 5)。窓口からはここ経由で immich-server:2283 だけに届く
+      - gw
     depends_on:
       redis:
         condition: service_started
@@ -92,6 +99,13 @@ services:
     restart: always
     healthcheck:
       disable: false
+
+networks:
+  # 内部ネットワーク(外部への出口なし)。guest-gateway の compose が external として参加する。
+  # このスタックの down で消えるため、その後は窓口も再起動する
+  gw:
+    name: photosaver_gw
+    internal: true
 
 volumes:
   model-cache:

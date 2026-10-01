@@ -39,8 +39,9 @@ unless the user explicitly changes this policy.
 - **`server/docker-compose.yml`** is based on the official Immich release compose.
   When updating it, diff against
   `https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml`
-  and keep our three deltas: 127.0.0.1 port binding, `mount-guard` service,
-  QSV `extends`. Never remove the mount-guard dependency — it prevents writes into
+  and keep our four deltas: 127.0.0.1 port binding, `mount-guard` service,
+  QSV `extends`, and the internal `photosaver_gw` network on `immich-server` (guest-gateway only;
+  never attach Redis/Postgres to it). Never remove the mount-guard dependency — it prevents writes into
   an empty mountpoint when the HDD is missing.
 - **Immich version**: `.env` uses the `v3` metatag (major-pinned). Never suggest
   unpinned `release`/`latest`, never suggest auto-updaters (Watchtower is EOL and
