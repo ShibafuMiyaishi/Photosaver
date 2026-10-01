@@ -155,12 +155,15 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   for album assets and 400 for trashed ones (verified): the importer uses it to record `trashed`
   (UI explains) or, if the organiser restored it, a normal `duplicate` + clears `deleted_at`.
   The share key cannot restore from trash — the organiser restores in Immich.
-- ZIP (PCs): `POST /api/download` (session + CSRF header) asks Immich for a plan with ~2 GiB parts,
+- ZIP (PCs): `POST /api/download` (session + CSRF header) asks Immich for a plan with ~2 GiB parts
+  (one Immich plan is shared single-flight for 10 s, so repeated taps or scripts cannot flood it),
   keeps it in memory (one per device, 24 h, max 500) and returns `{id, totalSize, parts:[{size,count}]}`.
   `GET /download/:planId/:n` is opened by navigation, so it checks the session itself and answers
   errors as small HTML pages; it serves only the caller's plan, filters the part to what the album
   listing holds right now (plus listed assets' `livePhotoVideoId`) so a trashed asset cannot fail
-  the whole ZIP, allows 2 ZIPs per device / 4 in total (429 page), uses the heavy idle timeout,
+  the whole ZIP, allows 2 ZIPs per device / 4 in total (429 page; the slot is reserved and its
+  release registered BEFORE any await, so parallel or abandoned requests cannot leak or bypass it),
+  uses the heavy idle timeout,
   answers HEAD without asking Immich, and names files `photos.zip` / `photos-<n>-of-<total>.zip`.
 
 ## Client-side gotchas (iOS especially)
@@ -169,14 +172,24 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 - iOS suspends the page on lock/app switch → tus resume on `visibilitychange`, Screen Wake Lock,
   persistent "keep this screen open" banner. tus `chunkSize` 50 MB (keeps Cloudflare fallback viable),
   long `retryDelays`, fingerprint = name+size+deviceId, `removeFingerprintOnSuccess: true`.
-- Large downloads: direct navigation (`<a href>`), never fetch→blob (Safari WebKitBlobResource error).
+- Large downloads: direct navigation (`<a href>`), never fetch→blob of big files (Safari
+  WebKitBlobResource error / tab killed). Exceptions, all size-capped: share-sheet saves (a File must
+  be in memory) and Android bulk (blob → `<a download>`, one file at a time, ≤ 500 MB).
   Photo save to Photos app: `navigator.share({files})`, file pre-fetched before the tap.
 - Saving is per platform (`public/bulk.js` `saveMode()`): iPhone/iPad (UA, iPadOS via touch) with
-  file sharing → share sheet into Photos, photos AND videos up to 500 MB each (larger → direct
-  download into Files, on a later tap so it is still a gesture); bulk = batches of ≤ 30 files /
-  ~300 MB, one share sheet per tap. Android → downloads (the share sheet has no "save to gallery"):
-  single = direct navigation, bulk = sequential fetch → blob → `<a download>`. PCs → ZIP (single =
-  direct download). iOS without file sharing (some in-app browsers) → "open in Safari" + ZIP only.
-  Saved ids live in `localStorage` (`gw-saved-v1`, best effort); own uploads excluded by default.
+  file sharing → share sheet into Photos (photos AND videos). Single save: one file ≤ 500 MB,
+  dropped when the viewer moves on; larger, or refused by the sheet → the NEXT tap downloads it into
+  Files (a download after an await is no longer a user gesture). Bulk: files fetched one at a time
+  into batches of ≤ 30 files / ≤ 300 MB, ≤ 200 MB per file (a file that does not fit the current
+  batch starts the next one; bigger or non-shareable ones go to a one-by-one list); one share sheet
+  per tap; the button is disabled while the sheet is open. Files the relay labelled
+  octet-stream get a type from the extension. Android → downloads (the share sheet has no "save to
+  gallery"): single = direct navigation, bulk = sequential fetch → blob → `<a download>`.
+  Android WebViews (`; wv)`, LINE, FB, Instagram) and iOS without file sharing → 'unsupported'
+  ("open in Safari / Chrome" + ZIP). PCs → ZIP (single = direct download). Retries: 429 backs off
+  with jitter up to 20 times, errors 6 times; 3 items failing in a row stop the run.
+  Saved ids live in `localStorage` (`gw-saved-v1`, best effort; phone modes only, ZIP = whole
+  album); own uploads excluded by default. Android cannot confirm a download happened (blocked
+  multi-download prompt), so the end message points to 「保存済みの記録を消す」.
   Batch/size limits are unverified on real devices — tune after the T4 check.
 - Guide text: "keep the screen open", "if many, 10 at a time", "Options → Format → Current" (immich#20636).

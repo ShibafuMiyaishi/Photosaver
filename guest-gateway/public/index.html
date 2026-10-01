@@ -66,7 +66,15 @@
           <div class="gallery-bar">
             <span id="gallery-count"></span>
             <span id="gallery-status" role="status"></span>
-            <button id="gallery-bulk" type="button" class="small">まとめて保存</button>
+            <button
+              id="gallery-bulk"
+              type="button"
+              class="small"
+              aria-controls="bulk"
+              aria-expanded="false"
+            >
+              まとめて保存
+            </button>
             <button id="gallery-refresh" type="button" class="small">更新</button>
           </div>
 
@@ -84,6 +92,7 @@
               <button id="bulk-start" type="button">準備する</button>
               <button id="bulk-stop" type="button" class="small" hidden>やめる</button>
             </div>
+            <p id="bulk-progress" class="muted"></p>
             <p id="bulk-status" class="bulk-status" role="status"></p>
             <ul id="bulk-large" class="bulk-list" hidden></ul>
             <ul id="bulk-zip" class="bulk-list" hidden></ul>

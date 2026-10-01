@@ -27,16 +27,21 @@ function fakeImmich() {
     infoError: null,
     archiveError: null,
     archiveCalls: [],
+    infoCalls: 0,
+    // When set, album listings wait for it (a slow, cold listing).
+    albumGate: null,
     // When set, archive bodies stay open until released (for the concurrency limit).
     hold: false,
     releases: [],
     async getAlbum() {
+      await this.albumGate;
       return { assetCount: this.listed.length };
     },
     async listAlbumAssets() {
       return { items: this.listed, nextCursor: null };
     },
     async downloadInfo({ albumId, archiveSize }) {
+      this.infoCalls += 1;
       if (this.infoError) throw this.infoError;
       expect(albumId).toBe(ALBUM);
       expect(archiveSize).toBeGreaterThan(0);
@@ -186,6 +191,57 @@ describe('ZIP download', () => {
     await new Promise((r) => setTimeout(r, 20));
     ctx.immich.hold = false;
     expect((await part(ctx, id, 1)).status).toBe(200);
+  });
+
+  it('frees the slot when the guest leaves while the album is being listed', async () => {
+    ctx = await setup();
+    const { id } = await (await plan(ctx)).json();
+    let open;
+    ctx.immich.albumGate = new Promise((resolve) => {
+      open = resolve;
+    });
+    // Both slots of this device are taken by requests that give up during the slow listing.
+    for (let i = 0; i < 2; i += 1) {
+      const controller = new AbortController();
+      const pending = fetch(`${ctx.srv.baseUrl}/download/${id}/1`, {
+        headers: { Cookie: ctx.cookie },
+        signal: controller.signal,
+      }).catch(() => null);
+      await new Promise((r) => setTimeout(r, 30));
+      controller.abort();
+      await pending;
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    open();
+    ctx.immich.albumGate = null;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ctx.immich.archiveCalls).toEqual([]);
+    const res = await part(ctx, id, 1);
+    expect(res.status).toBe(200);
+    await res.text();
+  });
+
+  it('counts parallel requests before the listing, so they cannot all pass the limit', async () => {
+    ctx = await setup();
+    ctx.immich.hold = true;
+    const { id } = await (await plan(ctx)).json();
+    let open;
+    ctx.immich.albumGate = new Promise((resolve) => {
+      open = resolve;
+    });
+    const requests = [1, 2, 1].map((n) => part(ctx, id, n));
+    await new Promise((r) => setTimeout(r, 50));
+    open();
+    const responses = await Promise.all(requests);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 200, 429]);
+    for (const release of ctx.immich.releases.splice(0)) release();
+    await Promise.all(responses.map((r) => r.text()));
+  });
+
+  it('shares one Immich plan between quick repeated requests', async () => {
+    ctx = await setup();
+    await Promise.all([plan(ctx), plan(ctx), plan(ctx)]);
+    expect(ctx.immich.infoCalls).toBe(1);
   });
 
   it('answers HEAD without building a ZIP', async () => {

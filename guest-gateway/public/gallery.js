@@ -259,9 +259,16 @@ async function onSave(button, asset) {
       prepared.clear();
       markSaved([asset.id]);
     } catch (err) {
-      // AbortError = the guest closed the share sheet (keep the file for another try);
-      // anything else → plain download.
-      if (err?.name !== 'AbortError') downloadDirectly(asset);
+      // AbortError = the guest closed the share sheet (keep the file for another try).
+      // Anything else: the sheet refused the file; the next tap downloads it instead (a download
+      // started here, after the await, would no longer count as the guest's tap).
+      if (err?.name !== 'AbortError') {
+        prepared.clear();
+        prepared.set(asset.id, 'download');
+        noteFor(asset, 'もう一度タップすると「ファイル」アプリに保存されます');
+        const shown = currentAsset();
+        if (shown) button.textContent = saveLabel(shown);
+      }
     }
     return;
   }
@@ -438,6 +445,8 @@ function setupLightbox() {
       onInit: (el, pswp) => {
         el.classList.add('gw-save');
         pswp.on('change', () => {
+          // A prepared original (up to hundreds of MB) is only kept for the item on screen.
+          if (!prepared.has(pswp.currSlide.data.asset.id)) prepared.clear();
           el.textContent = saveLabel(pswp.currSlide.data.asset);
           // refreshSlideContent also fires 'change'; only a real slide change clears the note.
           if (pswp.currIndex !== shownIndex) {

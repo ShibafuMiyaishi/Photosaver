@@ -117,7 +117,7 @@ export function createImmichClient({
    * Resolves with the upstream Response when its status is in `statuses`.
    */
   async function openStream(op, path, { method = 'GET', headers = {}, json, signal, statuses }) {
-    if (!shareKey) throw new ImmichError(op, 0);
+    if (!shareKey || signal?.aborted) throw new ImmichError(op, 0);
     const allHeaders = {
       ...headers,
       'x-immich-share-key': shareKey,

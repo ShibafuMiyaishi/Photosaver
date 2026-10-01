@@ -123,6 +123,9 @@ export function createGalleryRouter({
   let heavyInFlight = 0;
   // planId → { deviceId, createdAt, parts: string[][] }; Map order = creation order.
   const zipPlans = new Map();
+  // { at, promise } of the last Immich plan, shared by all guests for a short time: planning
+  // queries the whole album, so repeated taps or scripts must not each hit Immich.
+  let zipInfoCache = null;
   // deviceId → ZIP streams in flight.
   const zipInFlight = new Map();
   let zipStreams = 0;
@@ -343,11 +346,31 @@ export function createGalleryRouter({
   }
 
   // Plan the ZIP parts for this guest (PCs; phones save into the photo app instead).
+  function loadZipInfo() {
+    if (zipInfoCache && (zipInfoCache.at === null || now() - zipInfoCache.at < LIST_CACHE_MS)) {
+      return zipInfoCache.promise;
+    }
+    const entry = {
+      at: null,
+      promise: immich.downloadInfo({ albumId, archiveSize: ZIP_PART_BYTES }),
+    };
+    entry.promise.then(
+      () => {
+        entry.at = now();
+      },
+      () => {
+        if (zipInfoCache === entry) zipInfoCache = null;
+      },
+    );
+    zipInfoCache = entry;
+    return entry.promise;
+  }
+
   router.post('/api/download', async (req, res) => {
     const { deviceId } = req.gwSession;
     let info;
     try {
-      info = await immich.downloadInfo({ albumId, archiveSize: ZIP_PART_BYTES });
+      info = await loadZipInfo();
     } catch (err) {
       log('error', 'zip_plan_failed', { status: err.status ?? 0, error: err.message });
       return res.status(502).json({ error: 'unavailable' });
@@ -407,14 +430,26 @@ export function createGalleryRouter({
       return res.end();
     }
     const { deviceId } = session;
-    const mine = zipInFlight.get(deviceId) ?? 0;
-    if (mine >= ZIP_PER_DEVICE || zipStreams >= ZIP_STREAMS_TOTAL) {
+    if ((zipInFlight.get(deviceId) ?? 0) >= ZIP_PER_DEVICE || zipStreams >= ZIP_STREAMS_TOTAL) {
       return sendPage(
         res,
         429,
         'ダウンロードが混み合っています。今のダウンロードが終わってから、もう一度お試しください。',
       );
     }
+
+    // Reserve the slot before any await and release it when the response ends, whichever way:
+    // parallel requests cannot all pass the check, and a guest leaving early frees it.
+    zipInFlight.set(deviceId, (zipInFlight.get(deviceId) ?? 0) + 1);
+    zipStreams += 1;
+    const controller = new AbortController();
+    res.once('close', () => {
+      controller.abort();
+      const left = (zipInFlight.get(deviceId) ?? 1) - 1;
+      if (left > 0) zipInFlight.set(deviceId, left);
+      else zipInFlight.delete(deviceId);
+      zipStreams -= 1;
+    });
 
     // Only what is in the album right now: one trashed id makes Immich reject the whole ZIP.
     let album;
@@ -433,21 +468,14 @@ export function createGalleryRouter({
       present.add(asset.id);
       if (isUuid(asset.livePhotoVideoId)) present.add(asset.livePhotoVideoId);
     }
+    if (controller.signal.aborted) return undefined;
     const assetIds = plan.parts[index].filter((id) => present.has(id));
+    if (assetIds.length < plan.parts[index].length) {
+      log('info', 'zip_assets_skipped', { skipped: plan.parts[index].length - assetIds.length });
+    }
     if (assetIds.length === 0) {
       return sendPage(res, 404, 'この ZIP の写真はすべて削除されています。');
     }
-
-    zipInFlight.set(deviceId, mine + 1);
-    zipStreams += 1;
-    const controller = new AbortController();
-    res.once('close', () => {
-      controller.abort();
-      const left = (zipInFlight.get(deviceId) ?? 1) - 1;
-      if (left > 0) zipInFlight.set(deviceId, left);
-      else zipInFlight.delete(deviceId);
-      zipStreams -= 1;
-    });
 
     let upstream;
     try {
