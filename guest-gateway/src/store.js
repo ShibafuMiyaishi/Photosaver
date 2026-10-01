@@ -6,7 +6,8 @@
 import { DatabaseSync } from 'node:sqlite';
 
 // pending: waiting for / retrying the Immich upload. created / duplicate: in the album.
-// failed: given up (the staged file is gone).
+// failed: given up; the staged file was moved to failed/ in the staging dir (or, if that move
+// failed, left in importing/). scripts/requeue-failed.js turns it back into pending.
 // trashed: re-uploaded while the asset sat in Immich's trash after a delete here; Immich matches
 // the trashed copy (verified on v3.2.4) and does not put it back in the album.
 // Deleting an asset does not change the status: `deleted_at` marks it instead, so ownership and
@@ -66,6 +67,13 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
   );
   const setFailed = db.prepare(
     "UPDATE uploads SET status = 'failed', updated_at = ? WHERE upload_id = ?",
+  );
+  // Only a failed row: never resets one the importer already finished.
+  const setRequeued = db.prepare(
+    "UPDATE uploads SET status = 'pending', attempts = 0, updated_at = ? WHERE upload_id = ? AND status = 'failed'",
+  );
+  const failedRows = db.prepare(
+    "SELECT upload_id, size, attempts, updated_at FROM uploads WHERE status = 'failed' ORDER BY updated_at, rowid",
   );
   const bumpAttempts = db.prepare(
     'UPDATE uploads SET attempts = attempts + 1, updated_at = ? WHERE upload_id = ? RETURNING attempts',
@@ -143,6 +151,24 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
 
     markFailed(uploadId) {
       setFailed.run(now(), uploadId);
+    },
+
+    /**
+     * Back to pending with a fresh attempt budget (the operator moved the file back into
+     * importing/). True when the row was failed and is now pending.
+     */
+    requeue(uploadId) {
+      return setRequeued.run(now(), uploadId).changes === 1;
+    },
+
+    /** Given-up rows for the operator, oldest first (no nicknames or file names). */
+    listFailed() {
+      return failedRows.all().map((r) => ({
+        id: r.upload_id,
+        size: r.size,
+        attempts: r.attempts,
+        failedAt: r.updated_at,
+      }));
     },
 
     /** Count one Immich attempt; returns the new total. */

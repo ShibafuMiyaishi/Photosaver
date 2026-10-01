@@ -70,6 +70,19 @@ function shortHash(value) {
 }
 
 /**
+ * Final error handler (Express needs the 4-arg signature). Errors never carry details to the
+ * client. Once the response has started, a status can no longer be sent: Express' default
+ * handler then closes the connection, so a cut-off body is never taken as complete.
+ */
+export function handleError(err, req, res, next) {
+  // body-parser errors (malformed JSON, too large) carry a 4xx status.
+  const status = err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status === 500) log('error', 'unhandled', { path: req.path, error: err.message });
+  if (res.headersSent) return next(err);
+  return res.status(status).json({ error: status === 500 ? 'internal' : 'bad_request' });
+}
+
+/**
  * @param {ReturnType<import('./config.js').loadConfig>} config
  * @param {{
  *   store?: ReturnType<import('./store.js').openStore>,
@@ -92,7 +105,10 @@ export function createApp(config, { store, importer, immich } = {}) {
         }
       : {},
   );
-  const lockout = createLockout();
+  const lockout = createLockout({
+    maxFailures: config.loginMaxFailures,
+    baseLockMs: config.loginLockMs,
+  });
   const isClosed = () => Date.now() >= config.closesAt;
   // Fingerprint of the organiser password hash, stored in admin sessions.
   const adminTag = config.adminPasswordHash ? shortHash(config.adminPasswordHash) : null;
@@ -169,13 +185,16 @@ export function createApp(config, { store, importer, immich } = {}) {
     return next();
   };
 
-  // Coarse outer cap on failed/rejected login requests per IP. Successful logins are not
-  // counted, so many guests behind one venue NAT can all sign in; the real brute-force
-  // control is `lockout`.
+  // Coarse outer cap on malformed or abandoned login requests per IP (bad body, bad nickname,
+  // body timeout). Successful logins, wrong passwords (401) and the lockout's own refusals
+  // (429) are not counted: guesses are `lockout`'s job, and counting them here would turn a
+  // short venue lock (many guests behind one NAT retrying) into a 15-minute one.
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 30,
     skipSuccessfulRequests: true,
+    requestWasSuccessful: (_req, res) =>
+      res.statusCode < 400 || [401, 429].includes(res.statusCode),
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     handler: (req, res) => {
@@ -331,14 +350,7 @@ export function createApp(config, { store, importer, immich } = {}) {
 
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
-  // Express needs the 4-arg signature to treat this as the error handler.
-  app.use((err, req, res, _next) => {
-    // body-parser errors (malformed JSON, too large) carry a 4xx status.
-    const status = err.status >= 400 && err.status < 500 ? err.status : 500;
-    if (status === 500) log('error', 'unhandled', { path: req.path, error: err.message });
-    if (!res.headersSent)
-      res.status(status).json({ error: status === 500 ? 'internal' : 'bad_request' });
-  });
+  app.use(handleError);
 
   return { app, tusServer, isClosed };
 }

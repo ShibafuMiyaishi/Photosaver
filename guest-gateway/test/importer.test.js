@@ -1,5 +1,5 @@
 // guest-gateway/test/importer.test.js
-// 取り込みキューを偽の Immich クライアントで検証する(成功・再試行・確定失敗・並列数・停止・再開)。
+// 取り込みキューを偽の Immich クライアントで検証する(成功・再試行・確定失敗で failed/ へ退避・並列数・停止・再開)。
 
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -13,6 +13,7 @@ const ASSET_ID = '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b';
 
 describe('import queue', () => {
   let dir;
+  let failedDir;
   let store;
   let importer;
 
@@ -29,8 +30,8 @@ describe('import queue', () => {
     });
   }
 
-  const exists = (uploadId) =>
-    fs.stat(path.join(dir, uploadId)).then(
+  const exists = (uploadId, inDir = dir) =>
+    fs.stat(path.join(inDir, uploadId)).then(
       () => true,
       () => false,
     );
@@ -40,6 +41,7 @@ describe('import queue', () => {
       store,
       immich: { uploadAsset },
       dir,
+      failedDir,
       retryDelaysMs: [5],
       ...options,
     });
@@ -47,7 +49,9 @@ describe('import queue', () => {
   }
 
   beforeEach(async () => {
-    dir = path.join(TMP_ROOT, `importer-${crypto.randomUUID()}`);
+    const root = path.join(TMP_ROOT, `importer-${crypto.randomUUID()}`);
+    dir = path.join(root, 'importing');
+    failedDir = path.join(root, 'failed');
     await fs.mkdir(dir, { recursive: true });
     store = openStore(':memory:');
   });
@@ -55,7 +59,7 @@ describe('import queue', () => {
   afterEach(async () => {
     importer?.stop();
     store.close();
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(path.dirname(dir), { recursive: true, force: true });
   });
 
   it('uploads a received file, records the asset and removes the staged copy', async () => {
@@ -77,6 +81,7 @@ describe('import queue', () => {
     });
     expect(store.get('u1')).toMatchObject({ status: 'created', asset_id: ASSET_ID, attempts: 1 });
     expect(await exists('u1')).toBe(false);
+    expect(await exists('u1', failedDir)).toBe(false);
   });
 
   it('records duplicates with the existing asset id', async () => {
@@ -85,6 +90,7 @@ describe('import queue', () => {
     importer.enqueue('u1');
     await importer.idle();
     expect(store.get('u1')).toMatchObject({ status: 'duplicate', asset_id: ASSET_ID });
+    expect(await exists('u1')).toBe(false);
   });
 
   it.each([[0], [401], [404], [429], [503]])(
@@ -105,7 +111,7 @@ describe('import queue', () => {
   );
 
   it.each([[400], [413], [415], [422]])(
-    'gives up at once when Immich rejects the file (status %s)',
+    'gives up at once when Immich rejects the file (status %s) and keeps it in failed/',
     async (status) => {
       let calls = 0;
       start(async () => {
@@ -118,6 +124,7 @@ describe('import queue', () => {
       expect(calls).toBe(1);
       expect(store.get('u1').status).toBe('failed');
       expect(await exists('u1')).toBe(false);
+      expect(await fs.readFile(path.join(failedDir, 'u1'), 'utf8')).toBe('bytes');
     },
   );
 
@@ -129,7 +136,7 @@ describe('import queue', () => {
     expect(totalMs).toBeGreaterThanOrEqual(24 * 60 * 60_000);
   });
 
-  it('gives up after maxAttempts transient failures', async () => {
+  it('gives up after maxAttempts transient failures and keeps the file in failed/', async () => {
     let calls = 0;
     start(
       async () => {
@@ -144,6 +151,20 @@ describe('import queue', () => {
     expect(calls).toBe(3);
     expect(store.get('u1')).toMatchObject({ status: 'failed', attempts: 3 });
     expect(await exists('u1')).toBe(false);
+    expect(await exists('u1', failedDir)).toBe(true);
+  });
+
+  it('leaves a given-up file in importing/ when it cannot be moved to failed/', async () => {
+    // A plain file where failed/ should be: mkdir and rename both fail.
+    await fs.writeFile(failedDir, 'not a directory');
+    start(async () => {
+      throw new ImmichError('upload', 400);
+    });
+    await receive('u1');
+    importer.enqueue('u1');
+    await importer.idle();
+    expect(store.get('u1').status).toBe('failed');
+    expect(await exists('u1')).toBe(true);
   });
 
   it('marks a row failed without calling Immich when the staged file is gone', async () => {
@@ -231,6 +252,7 @@ describe('import queue', () => {
           isAssetVisible: async () => visible,
         },
         dir,
+        failedDir,
         retryDelaysMs: [5],
       });
       store.add({

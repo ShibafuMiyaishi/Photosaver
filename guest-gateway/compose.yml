@@ -58,6 +58,8 @@ services:
       MAX_FILE_GB: ${MAX_FILE_GB:-4}
       MIN_FREE_GB: ${MIN_FREE_GB:-10}
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
+      LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-20}
+      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-2}
       MOUNT_MARKER: /run/photosaver/mount-ok
       IMMICH_URL: http://immich-server:2283
       DB_PATH: /data/db/gateway.db

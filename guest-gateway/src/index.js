@@ -10,7 +10,7 @@ import { createImmichClient } from './immich.js';
 import { createImporter } from './importer.js';
 import { log } from './log.js';
 import { openStore } from './store.js';
-import { IMPORT_DIR_NAME, mountMarkerPresent, purgeStaging } from './uploads.js';
+import { FAILED_DIR_NAME, IMPORT_DIR_NAME, mountMarkerPresent, purgeStaging } from './uploads.js';
 
 const CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 const CLOSE_CHECK_INTERVAL_MS = 60 * 1000;
@@ -57,6 +57,7 @@ if (config.immich) {
     store,
     immich,
     dir: path.join(config.stagingDir, IMPORT_DIR_NAME),
+    failedDir: path.join(config.stagingDir, FAILED_DIR_NAME),
   });
   log('info', 'import_resumed', { count: importer.resume() });
   // Not fatal: Immich may still be starting; failed imports are retried anyway.
@@ -85,6 +86,13 @@ const server = app.listen(config.port, config.host, () => {
 });
 // Large uploads arrive as 50 MB tus chunks; keep a generous per-request timeout.
 server.requestTimeout = 30 * 60 * 1000;
+// Every request comes through tailscaled's serve proxy, which reuses idle upstream connections
+// for up to 90 s (Go http.Transport IdleConnTimeout in ipn/ipnlocal/serve.go). Node's default
+// 5 s keep-alive would close them under it, and a request sent on a connection we are closing
+// (e.g. a tus PATCH, whose body the proxy cannot replay) fails as a 502. So outlast the proxy;
+// headersTimeout must exceed keepAliveTimeout and stay <= requestTimeout.
+server.keepAliveTimeout = 95_000;
+server.headersTimeout = 96_000;
 
 const cleanupTimer = setInterval(() => {
   tusServer
@@ -98,6 +106,7 @@ const closeTimer = setInterval(() => {
   if (purged || !isClosed()) return;
   purged = true;
   // Files still waiting for Immich stay; the importer removes each one when it is done.
+  // failed/ is never purged (see purgeStaging).
   purgeStaging(config.stagingDir, { keep: importer ? [IMPORT_DIR_NAME] : [] })
     .then((count) => log('info', 'closed_staging_purged', { count }))
     .catch((err) => log('error', 'purge_failed', { error: err.message }));

@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as tus from 'tus-js-client';
 import { createImporter } from '../src/importer.js';
 import { openStore } from '../src/store.js';
-import { IMPORT_DIR_NAME, purgeStaging } from '../src/uploads.js';
+import { FAILED_DIR_NAME, IMPORT_DIR_NAME, purgeStaging } from '../src/uploads.js';
 import { login, startServer } from './helpers/server.js';
 
 const PNG = Buffer.from(
@@ -67,6 +67,7 @@ describe('import mode', () => {
       store,
       immich,
       dir: path.join(srv.stagingDir, IMPORT_DIR_NAME),
+      failedDir: path.join(srv.stagingDir, FAILED_DIR_NAME),
       retryDelaysMs: [5],
     });
   });
@@ -146,15 +147,41 @@ describe('import mode', () => {
     }
   });
 
-  it('keeps files waiting for Immich when staging is purged at the deadline', async () => {
+  it('keeps files waiting for Immich and given-up files when staging is purged', async () => {
     const { cookie } = await login(srv.baseUrl);
     const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0002.png');
     expect(result.ok).toBe(true);
     await fs.writeFile(path.join(srv.stagingDir, 'partial-upload'), 'x');
+    await fs.mkdir(path.join(srv.stagingDir, FAILED_DIR_NAME));
+    await fs.writeFile(path.join(srv.stagingDir, FAILED_DIR_NAME, 'given-up'), 'x');
 
     await purgeStaging(srv.stagingDir, { keep: [IMPORT_DIR_NAME] });
-    expect(await fs.readdir(srv.stagingDir)).toEqual([IMPORT_DIR_NAME]);
+    expect((await fs.readdir(srv.stagingDir)).sort()).toEqual([FAILED_DIR_NAME, IMPORT_DIR_NAME]);
     expect(await fs.readdir(path.join(srv.stagingDir, IMPORT_DIR_NAME))).toEqual([result.id]);
+    expect(await fs.readdir(path.join(srv.stagingDir, FAILED_DIR_NAME))).toEqual(['given-up']);
+
+    // Speed-test mode passes no keep list: failed/ still stays.
+    await purgeStaging(srv.stagingDir);
+    expect(await fs.readdir(srv.stagingDir)).toEqual([FAILED_DIR_NAME]);
+  });
+
+  it('leaves failed/ alone when tus removes expired uploads', async () => {
+    // An abandoned tus upload from three days ago, next to a given-up file.
+    const info = {
+      id: 'expired1',
+      size: 10,
+      offset: 0,
+      metadata: {},
+      creation_date: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
+    };
+    await fs.writeFile(path.join(srv.stagingDir, 'expired1'), '');
+    await fs.writeFile(path.join(srv.stagingDir, 'expired1.json'), JSON.stringify(info));
+    await fs.mkdir(path.join(srv.stagingDir, FAILED_DIR_NAME));
+    await fs.writeFile(path.join(srv.stagingDir, FAILED_DIR_NAME, 'given-up'), 'x');
+
+    expect(await srv.tusServer.cleanUpExpiredUploads()).toBe(1);
+    expect(await fs.readdir(srv.stagingDir)).toEqual([FAILED_DIR_NAME]);
+    expect(await fs.readdir(path.join(srv.stagingDir, FAILED_DIR_NAME))).toEqual(['given-up']);
   });
 });
 

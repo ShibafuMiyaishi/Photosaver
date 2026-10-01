@@ -1,29 +1,36 @@
 // guest-gateway/src/importer.js
 // 取り込みキュー: 受信済みファイルを共有リンク経由で Immich に送り(アルバムへは Immich が自動追加)、
 // 結果を記録してステージングのファイルを消す。Immich の一時的な不調では間隔を空けて再試行し、
-// ファイル自体が原因の拒否では失敗として確定する。状態は store にあるので再起動しても再開できる。
+// Immich が拒否したとき(共有リンクの設定変更でも起きる)や再試行の上限では失敗として確定するが、
+// ファイルは消さずに failed/ へ移す(元の写真のバックアップは無いため。scripts/requeue-failed.js で
+// 取り込み待ちに戻せる)。状態は store にあるので再起動しても再開できる。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ImmichError } from './immich.js';
 import { log } from './log.js';
 
-// Immich rejected the file itself; re-sending the same bytes cannot succeed.
+// Immich rejected the request; re-sending the same bytes as-is will not succeed. Not always the
+// file's fault (a 400 also comes from a shared link whose upload permission was switched off),
+// so the file is set aside in failed/, never deleted.
 const PERMANENT_STATUSES = new Set([400, 413, 415, 422]);
 // Network errors, 5xx, 429 and 401/403/404 (key, link or album misconfigured: fixable by the
 // admin, then picked up again) are retried with these delays; the last one repeats.
 export const DEFAULT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000];
-// About a day of retries with the default delays: giving up deletes the guest's file, so an
-// Immich outage during the event (or overnight after it) must not run this out.
+// About a day of retries with the default delays: giving up needs the operator (requeue from
+// failed/), so an Immich outage during the event (or overnight after it) must not run this out.
 export const DEFAULT_MAX_ATTEMPTS = 300;
 // tus ids are random hex; anything else must never be joined into a path.
-const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+export const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
+ * dir: importing/ (one file per upload id). failedDir: where given-up files are moved; must be
+ * on the same filesystem (a rename, never a copy).
  * @param {{
  *   store: ReturnType<import('./store.js').openStore>,
  *   immich: ReturnType<import('./immich.js').createImmichClient>,
  *   dir: string,
+ *   failedDir: string,
  *   concurrency?: number,
  *   retryDelaysMs?: number[],
  *   maxAttempts?: number,
@@ -33,6 +40,7 @@ export function createImporter({
   store,
   immich,
   dir,
+  failedDir,
   concurrency = 2,
   retryDelaysMs = DEFAULT_RETRY_DELAYS_MS,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
@@ -56,6 +64,16 @@ export function createImporter({
     await fs.rm(filePathOf(uploadId), { force: true }).catch((err) => {
       log('error', 'import_staging_remove_failed', { id: uploadId, error: err.message });
     });
+  }
+
+  /** Keep a given-up file for the operator. If the move fails, it stays in importing/. */
+  async function setAside(uploadId) {
+    try {
+      await fs.mkdir(failedDir, { recursive: true });
+      await fs.rename(filePathOf(uploadId), path.join(failedDir, uploadId));
+    } catch (err) {
+      log('error', 'import_set_aside_failed', { id: uploadId, error: err.message });
+    }
   }
 
   function scheduleRetry(uploadId, attempts) {
@@ -107,9 +125,11 @@ export function createImporter({
         log('error', 'import_unexpected_error', { id: uploadId, error: err?.message });
       }
       if (PERMANENT_STATUSES.has(status) || attempts >= maxAttempts) {
+        // Move the file before marking the row failed: requeue-failed.js only picks up failed
+        // rows, so it never sees one whose file is still on its way to failed/.
+        await setAside(uploadId);
         store.markFailed(uploadId);
         log('error', 'import_failed', { id: uploadId, status, attempts });
-        await discard(uploadId);
         return 'done';
       }
       log('warn', 'import_retry', { id: uploadId, status, attempts });

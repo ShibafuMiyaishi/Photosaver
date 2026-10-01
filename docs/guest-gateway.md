@@ -104,11 +104,13 @@ Funnel の帯域上限は非公開のため、**実機で測って採否を決�
 | 同時 | 5台で同時にアップロード(可能なら10本) |
 | 再開 | 途中で画面ロック、機内モード、Wi-Fi↔モバイル切替 → 続きから再開できるか |
 | iPhone の挙動 | HEIC/JPEG の扱い、動画が圧縮されるか、撮影日時 |
-| 接続元 IP | 窓口アプリから本当の接続元 IP が見えるか(ログイン試行制限に必要) |
+| 接続元 IP | 窓口アプリから本当の接続元 IP が見えるか(ログイン試行制限に必要。Tailscale は Funnel の接続元を `X-Forwarded-For` に入れる作りであることをソースで確認済み。実機では画面の「計測情報」で確かめる) |
 | 停止 | 停止コマンド後、外から窓口に届かず、tailnet 内の Immich は使えるか |
 | ダウンロード(本番準備後、T4) | モバイル回線の iPhone でまとめて保存(30 件)、PC で ZIP(2 GB)の時間。2〜3 台同時でもエラーなし |
 
 **合格の目安**: モバイル回線で 1GB が 15 分以内、5台同時でもエラーなし。
+接続元 IP の見え方によっては、ログイン試行制限を `.env` の `LOGIN_MAX_FAILURES`(15 分あたりの失敗回数、既定 20)・
+`LOGIN_LOCK_MINUTES`(最初のロックの分数、既定 2)で調整する(コードの変更は不要。「作り直し」で反映)。
 満たさない場合の代替: 国内 VPS 経由(月1,000円程度)、または Cloudflare Tunnel
 (tus の分割で 100MB 制限は回避可能。ただし CLAUDE.md のルール変更が必要)。
 
@@ -177,14 +179,16 @@ QR は手元の PC でオフラインのツールを使って作る(例: `qrenco
 ```bash
 docker exec guest_gateway node scripts/event-status.js   # 件数・容量・期限までの残り・HDD の空き
 docker compose -p wedding-gw logs --since 30m guest-gateway \
-  | grep -E 'import_retry|import_failed|import_file_missing|staging_dir_unavailable|login_locked|login_global_pause|upload_rejected|zip_|gallery_list_failed|media_relay_failed'
+  | grep -E 'import_retry|import_failed|import_set_aside_failed|import_file_missing|staging_dir_unavailable|login_locked|login_global_pause|upload_rejected|zip_|gallery_list_failed|media_relay_failed'
 ```
 
 - `event-status.js` は件数だけを表示する(ニックネーム・ファイル名は出さない)。⚠️ が出たら、表示どおりログを確認する
 - `import_retry` が続く(取り込み待ちが減らない): Immich 本体を確認する(`docker compose -p photosaver ps`)。
   窓口は受信済みのファイルを保持し、Immich が戻れば自動で取り込みを再開する(約1日は再試行を続ける)
-- `import_failed`: Immich がファイルを拒否した、または約1日再試行しても届かなかった。受信したファイルは削除済みなので、
-  その人に送り直してもらう
+- `import_failed`: Immich がファイルを拒否した、または約1日再試行しても届かなかった。受信したファイルは消さずに
+  ステージングの `failed/` に残してある(`import_set_aside_failed` が出た分は `importing/` に残っている)。
+  共有リンクの設定変更(アップロード許可を切った・作り直した)でも起きるので、原因を直してから
+  下の「困ったとき」の「取り込みに失敗したファイルを戻す」で取り込み直す
 - `upload_rejected_disk_full`: HDD の空きが「ファイルサイズ + `MIN_FREE_GB`(既定 10 GB)」に足りないファイルを断っている
   (小さいファイルはまだ通ることがある)。不要なファイルを消して空きを作る。`MIN_FREE_GB` を下げるのは、Immich 本体の
   空きも残る場合だけ
@@ -199,8 +203,8 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 |---|---|
 | LINE・Instagram などのアプリ内で開いて、うまく動かない | 右上のメニューから「ブラウザで開く」(Safari / Chrome)で開き直す |
 | 送信が止まった・進まない | 画面を開き直し、同じ写真をもう一度選ぶ → 送信済みの分の続きから再開する。電波の良い場所で |
-| 合言葉を何度か間違えて入れなくなった | 同じ接続元から 15 分で 5 回失敗すると 15 分ロック(繰り返すと長くなり、最長 24 時間)。Wi-Fi ⇄ モバイル回線を切り替えると別の接続元になる。会場 Wi-Fi で多数が巻き込まれた場合は「作り直し」(ロックはメモリ上なので解除される) |
-| 誰も入れない(`login_global_pause`) | 15 分間に全体で 100 回失敗すると、総当たり対策で 5 分間すべてのログインを止める。5 分待つ。続くなら合言葉が想定外に広まっていないか確認する |
+| 合言葉を何度か間違えて入れなくなった | 同じ接続元から 15 分で 20 回失敗すると 2 分ロック(繰り返すと倍々に長くなり、最長 60 分。回数と最初の長さは `.env` の `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES`)。会場 Wi-Fi では全員が同じ接続元になり、全員の入力ミスが合算される。Wi-Fi ⇄ モバイル回線を切り替えると別の接続元になる。会場 Wi-Fi で多数が巻き込まれた場合は「作り直し」(ロックはメモリ上なので解除される) |
+| 誰も入れない(`login_global_pause`) | 15 分間に全体で 300 回失敗すると、総当たり対策で 5 分間すべてのログインを止める。5 分待つ。続くなら合言葉が想定外に広まっていないか確認する |
 | 削除ボタンが出ない | 削除できるのは**同じスマホ・同じブラウザ**から送り、新しくアルバムに入った写真だけ(別のブラウザ・プライベートブラウズ・Cookie 削除・再ログイン後や、既にアルバムにあった写真の重複は不可)。幹事が管理者の合言葉で入って消す |
 | 「同じ写真が既にアルバムにあります」 | 正常。既に入っているので、もう一度送らなくてよい |
 | まとめて保存で写真アプリに入らない(iPhone) | 準備ができたらボタンを押し、表示されたメニューで「〇項目を保存」(写真だけなら「〇枚の画像を保存」)を選ぶ(「ファイルに保存」ではない)。LINE などのアプリ内では使えないので Safari で開く |
@@ -236,6 +240,15 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
   `scripts/hash-password.js` を実行)、`GUEST_PASSWORD_HASH` を差し替えて「作り直し」。新しくログインする人だけが新しい
   合言葉を必要とし、ログイン済みの人はそのまま使える。ログイン済みの人も全員追い出す場合は `SESSION_SECRET` も作り直す
   (全員が再ログインになり、それまでの写真は本人が削除できなくなる)
+- **取り込みに失敗したファイルを戻す**(`event-status.js` に失敗の ⚠️、ログに `import_failed`): 先にログの `status` で
+  原因を確かめて直す(400 なら共有リンクのアップロード許可・期限・作り直し後の `immich.env`、それ以外は Immich 本体)。
+  直さずに戻すと、また失敗して `failed/` に戻る(ファイルは消えない)。
+  ```bash
+  docker exec guest_gateway node scripts/requeue-failed.js           # 確認のみ: 件数と ID、ファイルが残っているか
+  docker exec guest_gateway node scripts/requeue-failed.js --apply   # failed/ → importing/ に戻し、取り込み待ちにする
+  ```
+  そのあと「作り直し」(起動時に取り込み待ちの分から取り込む)。`event-status.js` で取り込み待ちが減り、失敗が 0 件に
+  なることを確認する。「ファイルなし」と出た分は戻せないので、その人に送り直してもらう
 - **緊急停止**: `docker compose -p wedding-gw down`(外から窓口に届かなくなる。tailnet 内の Immich はそのまま使える)。
   受信済みの記録(`$GW/db`)とステージングは残るので、
   `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file $GW/.env up -d`(ビルドなし)で再開すれば取り込み待ちの分から続く
@@ -246,7 +259,8 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
 1. 期限を過ぎると窓口は自動で閉じる(ログイン・アップロード・閲覧すべて停止し、受信途中のファイルは削除される。
    受信済みで取り込み待ちの分は取り込みを続ける)。
    `docker exec guest_gateway node scripts/event-status.js` で取り込み待ちが 0 件になったこと(失敗の件数も)を確認してから
-   `docker compose -p wedding-gw down`。取り込み待ちが減らない場合はログの `import_retry` と Immich を確認する
+   `docker compose -p wedding-gw down`。失敗が残っていれば、先に「困ったとき」の「取り込みに失敗したファイルを戻す」で
+   取り込む(受付終了後のステージング削除でも `failed/` は消えない)。取り込み待ちが減らない場合はログの `import_retry` と Immich を確認する
    (Immich の停止や共有リンクの期限切れなど。窓口は約1日再試行を続ける)
 2. Tailscale 管理画面: 窓口ノード(`tag:wedding-gw`)を削除、認証キーを失効、`nodeAttrs` の funnel 行を削除
 3. Immich: 共有リンクを削除(アルバムと写真は残す)。削除用の API キーを削除
@@ -255,6 +269,7 @@ docker compose -p wedding-gw logs --since 30m guest-gateway \
    rm -f /srv/photosaver/guest-gateway/immich.env              # 共有リンクのキーなど
    sudo rm -f /srv/photosaver/guest-gateway/db/gateway.db*     # ニックネームの記録(ディレクトリは残す)
    sudo rm -r /srv/photosaver/guest-gateway/ts-state           # 窓口ノードの Tailscale 状態
+   ls /mnt/photo/guest-gateway/staging/failed 2>/dev/null      # 何か残っていたら消す前に上の手順 1 で取り込む
    sudo rm -r /mnt/photo/guest-gateway/staging/*               # ステージングの残り(中身だけ)
    ```
    `/srv/photosaver/guest-gateway/.env` の `TS_AUTHKEY` は空にする。記録を消したあとは、ゴミ箱から復元しても投稿者の表示は戻らない

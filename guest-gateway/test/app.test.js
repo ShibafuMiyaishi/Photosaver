@@ -6,7 +6,10 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import express from 'express';
 import * as tus from 'tus-js-client';
+import { vi } from 'vitest';
+import { handleError } from '../src/app.js';
 import { login, PASSWORD, startServer, TMP_ROOT } from './helpers/server.js';
 
 // 1x1 transparent PNG.
@@ -125,14 +128,14 @@ describe('open gateway', () => {
     expect(res.status).toBe(400);
   });
 
-  it('locks out an address after 5 wrong passwords, even for the right one', async () => {
-    for (let i = 0; i < 5; i += 1) {
+  it('locks out an address after 20 wrong passwords, even for the right one', async () => {
+    for (let i = 0; i < 20; i += 1) {
       expect((await login(srv.baseUrl, `wrong-${i}`)).res.status).toBe(401);
     }
-    const sixth = await login(srv.baseUrl, 'wrong-5');
-    expect(sixth.res.status).toBe(429);
-    expect(await sixth.res.json()).toEqual({ error: 'too_many_attempts' });
-    expect(sixth.res.headers.get('retry-after')).toBe('900');
+    const next = await login(srv.baseUrl, 'wrong-20');
+    expect(next.res.status).toBe(429);
+    expect(await next.res.json()).toEqual({ error: 'too_many_attempts' });
+    expect(next.res.headers.get('retry-after')).toBe('120');
     const correct = await login(srv.baseUrl);
     expect(correct.res.status).toBe(429);
     expect(correct.cookie).toBe('');
@@ -140,16 +143,16 @@ describe('open gateway', () => {
 
   it('does not let parallel wrong passwords bypass the lockout', async () => {
     const burst = await Promise.all(
-      Array.from({ length: 10 }, (_, i) => login(srv.baseUrl, `parallel-${i}`)),
+      Array.from({ length: 30 }, (_, i) => login(srv.baseUrl, `parallel-${i}`)),
     );
     const statuses = burst.map(({ res }) => res.status);
     expect(statuses.every((s) => s === 401 || s === 429)).toBe(true);
     let failures = statuses.filter((s) => s === 401).length;
-    expect(failures).toBeLessThanOrEqual(5);
+    expect(failures).toBeLessThanOrEqual(20);
     expect(burst.every(({ cookie }) => cookie === '')).toBe(true);
 
-    // Sequential wrong attempts still lock exactly at the 5th recorded failure.
-    while (failures < 5) {
+    // Sequential wrong attempts still lock exactly at the 20th recorded failure.
+    while (failures < 20) {
       expect((await login(srv.baseUrl, `sequential-${failures}`)).res.status).toBe(401);
       failures += 1;
     }
@@ -231,6 +234,42 @@ describe('open gateway', () => {
     const { cookie } = await login(srv.baseUrl);
     const res = await fetch(`${srv.baseUrl}/api/whoami`, { headers: { Cookie: cookie } });
     expect(await res.json()).toMatchObject({ viaFunnel: false });
+  });
+});
+
+describe('login lockout tuning', () => {
+  let srv;
+  beforeEach(async () => {
+    // LOGIN_MAX_FAILURES=2, a lock of 0.6 s instead of minutes.
+    srv = await startServer({ loginMaxFailures: 2, loginLockMs: 600 });
+  });
+  afterEach(async () => {
+    await srv.close();
+  });
+
+  it('uses the configured threshold and lets a venue back in once the lock ends', async () => {
+    for (let i = 0; i < 2; i += 1) {
+      expect((await login(srv.baseUrl, `wrong-${i}`)).res.status).toBe(401);
+    }
+    const locked = await login(srv.baseUrl);
+    expect(locked.res.status).toBe(429);
+    expect(locked.res.headers.get('retry-after')).toBe('1');
+    // Guests behind the same NAT keep trying while it is locked: these refusals must not
+    // add up in the outer rate limit (30) and extend the lock to 15 minutes.
+    for (let i = 0; i < 35; i += 1) {
+      expect((await login(srv.baseUrl, `retry-${i}`)).res.status).toBe(429);
+    }
+    await delay(700);
+    expect((await login(srv.baseUrl)).res.status).toBe(200);
+  });
+
+  it('still counts malformed requests in the outer rate limit (30 per window)', async () => {
+    for (let i = 0; i < 30; i += 1) {
+      expect((await login(srv.baseUrl, PASSWORD, '')).res.status).toBe(400);
+    }
+    expect((await login(srv.baseUrl, PASSWORD, '')).res.status).toBe(429);
+    // The limit is per address, so it blocks valid logins from there too.
+    expect((await login(srv.baseUrl)).res.status).toBe(429);
   });
 });
 
@@ -345,5 +384,64 @@ describe('closed gateway', () => {
       headers: { ...CSRF, 'Tus-Resumable': '1.0.0', 'Upload-Length': '10' },
     });
     expect(upload.status).toBe(410);
+  });
+});
+
+describe('final error handler', () => {
+  function fakeRes(headersSent) {
+    const res = { headersSent, statusCode: 200, body: undefined };
+    res.status = (code) => {
+      res.statusCode = code;
+      return res;
+    };
+    res.json = (body) => {
+      res.body = body;
+      return res;
+    };
+    return res;
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers without details before the response has started', () => {
+    const next = vi.fn();
+    const res = fakeRes(false);
+    handleError(new Error('/srv/internal/path exploded'), { path: '/x' }, res, next);
+    expect(res).toMatchObject({ statusCode: 500, body: { error: 'internal' } });
+    const tooLarge = fakeRes(false);
+    handleError(
+      Object.assign(new Error('too large'), { status: 413 }),
+      { path: '/x' },
+      tooLarge,
+      next,
+    );
+    expect(tooLarge).toMatchObject({ statusCode: 413, body: { error: 'bad_request' } });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('hands a mid-response error to Express, which closes the connection', async () => {
+    const app = express();
+    app.get('/partial', (_req, res, next) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': '100' });
+      res.write('only part of it');
+      next(new Error('upstream stream failed'));
+    });
+    app.use(handleError);
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/partial`);
+      expect(res.status).toBe(200);
+      // The body is cut off, not silently completed.
+      await expect(res.arrayBuffer()).rejects.toThrow();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

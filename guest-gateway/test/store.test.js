@@ -46,6 +46,28 @@ describe('upload store', () => {
     expect(store.listPending()).toHaveLength(0);
   });
 
+  it('requeues only failed rows, with a fresh attempt budget', () => {
+    store.add(ROW);
+    store.add({ ...ROW, uploadId: 'done' });
+    store.addAttempt('abc123');
+    store.addAttempt('abc123');
+    store.markFailed('abc123');
+    store.markImported('done', 'created', '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b');
+
+    expect(store.listFailed()).toEqual([
+      { id: 'abc123', size: 1234, attempts: 2, failedAt: expect.any(Number) },
+    ]);
+    expect(store.requeue('done')).toBe(false);
+    expect(store.requeue('missing')).toBe(false);
+    expect(store.get('done').status).toBe('created');
+
+    expect(store.requeue('abc123')).toBe(true);
+    expect(store.get('abc123')).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(store.requeue('abc123')).toBe(false);
+    expect(store.listFailed()).toEqual([]);
+    expect(store.listPending().map((r) => r.upload_id)).toEqual(['abc123']);
+  });
+
   it('lists only the caller device, newest first, without internal fields', () => {
     store.add(ROW);
     store.add({ ...ROW, uploadId: 'def456', filename: 'IMG_0002.MOV' });

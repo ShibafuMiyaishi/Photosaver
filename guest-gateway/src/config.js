@@ -2,7 +2,12 @@
 // 環境変数の読み込みと起動時バリデーション。不正なら throw し、index.js が終了させる。
 // IMMICH_SHARE_KEY が空なら速度検証モード(受信のみ・Immich へは取り込まない)。
 
+import { LOCKOUT_DEFAULTS } from './lockout.js';
+
 const GIB = 1024 ** 3;
+const MINUTE_MS = 60 * 1000;
+// The lock doubles up to an hour (lockout.js); a longer first lock would never double.
+const MAX_LOGIN_LOCK_MINUTES = LOCKOUT_DEFAULTS.maxLockMs / MINUTE_MS;
 
 const PLACEHOLDERS = new Set(['', 'CHANGE_ME', 'CHANGE_ME_64_HEX']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -22,6 +27,13 @@ function parsePositiveNumber(name, value, fallback) {
   if (value === undefined || value === '') return fallback;
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) throw fail(`${name} must be a positive number`);
+  return n;
+}
+
+function parsePositiveInteger(name, value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0) throw fail(`${name} must be a positive integer`);
   return n;
 }
 
@@ -88,6 +100,15 @@ export function loadConfig(env = process.env) {
 
   const port = parsePositiveNumber('PORT', env.PORT, 8080);
 
+  const loginLockMinutes = parsePositiveNumber(
+    'LOGIN_LOCK_MINUTES',
+    env.LOGIN_LOCK_MINUTES,
+    LOCKOUT_DEFAULTS.baseLockMs / MINUTE_MS,
+  );
+  if (loginLockMinutes > MAX_LOGIN_LOCK_MINUTES) {
+    throw fail(`LOGIN_LOCK_MINUTES must be at most ${MAX_LOGIN_LOCK_MINUTES}`);
+  }
+
   return {
     host: env.HOST || '127.0.0.1',
     port,
@@ -105,5 +126,13 @@ export function loadConfig(env = process.env) {
     immich: loadImmich(env),
     cookieSecure: parseBool(env.COOKIE_SECURE, true),
     trustProxyHops: parsePositiveNumber('TRUST_PROXY_HOPS', env.TRUST_PROXY_HOPS, 1),
+    // Login lockout per client address (venue Wi-Fi shares one): wrong passwords within
+    // 15 minutes before the first lock, and how long that lock lasts (it doubles on repeats).
+    loginMaxFailures: parsePositiveInteger(
+      'LOGIN_MAX_FAILURES',
+      env.LOGIN_MAX_FAILURES,
+      LOCKOUT_DEFAULTS.maxFailures,
+    ),
+    loginLockMs: loginLockMinutes * MINUTE_MS,
   };
 }

@@ -134,7 +134,7 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
         lastModified: Date.now(),
       });
       const before = (await client.getAlbum(event.albumId)).assetCount;
-      const importer = createImporter({ store, immich: client, dir });
+      const importer = createImporter({ store, immich: client, dir, failedDir: `${dir}-failed` });
       importer.enqueue('up1');
       await importer.idle();
       expect(store.get('up1')).toMatchObject({ status: 'created' });

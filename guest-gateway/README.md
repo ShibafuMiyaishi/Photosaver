@@ -13,7 +13,8 @@
 
 - ニックネーム + 合言葉でログイン(幹事は別の**管理者の合言葉**)。期限(`CLOSES_AT`)を過ぎると全機能が止まる
 - アップロード: tus で分割・再開可能(画面ロックや回線切替のあとも続きから)。中身を判定して写真・動画だけ受け付け、
-  取り込みキューが Immich の共有リンク経由でアルバムに追加する(Immich が止まっていても約 1 日再試行)
+  取り込みキューが Immich の共有リンク経由でアルバムに追加する(Immich が止まっていても約 1 日再試行。
+  諦めたファイルも消さずに `failed/` に残し、`scripts/requeue-failed.js` で取り込み直せる)
 - 「みんなの写真」: 一覧・拡大・動画再生・1 件ずつ保存・**まとめて保存**
   (iPhone / iPad → 共有メニューで写真アプリへ、Android → 端末にダウンロード、PC → ZIP)
 - 削除: 自分の端末から上げた写真だけ。管理者の合言葉なら全件(Immich のゴミ箱へ移るだけで復元できる)
@@ -26,15 +27,16 @@
 | `src/index.js` | 起動・定期処理(期限切れアップロードの掃除、受付終了時のステージング削除、取り込みの再開) |
 | `src/config.js` | 環境変数の読み込みと検証(`IMMICH_SHARE_KEY` が空なら速度検証モード) |
 | `src/app.js` | ルート定義(ここに無いものは 404)、セキュリティヘッダー、CSRF 対策、ログイン、期限後の 410 |
-| `src/auth.js` / `src/lockout.js` | 合言葉の scrypt 照合と署名付きセッション Cookie / 総当たり対策(接続元ごとのロック) |
+| `src/auth.js` / `src/lockout.js` | 合言葉の scrypt 照合と署名付きセッション Cookie / 総当たり対策(接続元ごとのロック。`LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` で調整) |
 | `src/uploads.js` | tus 受信(拡張子・サイズ・空き容量・中身の検査、計測ログ)→ 取り込み待ちへ |
-| `src/importer.js` / `src/store.js` | 取り込みキュー(Immich へ送信・再試行) / 受信と取り込み結果の記録(`node:sqlite`) |
+| `src/importer.js` / `src/store.js` | 取り込みキュー(Immich へ送信・再試行。諦めたファイルはステージングの `failed/` へ移して残す) / 受信と取り込み結果の記録(`node:sqlite`) |
 | `src/gallery.js` | 一覧(全件集約・重複除去)、画像・動画・原寸の中継、削除、ZIP の分割計画と中継 |
 | `src/immich.js` | Immich v3 の呼び出し(共有リンクキー: アップロード・一覧・メディア・ZIP / 削除専用キー: 削除) |
 | `src/log.js` | 1 行 1 JSON のログ(秘密情報は出さない) |
 | `public/` | ゲスト用画面(ビルド工程なし)。`gallery.js` は「みんなの写真」(PhotoSwipe)、`bulk.js` は端末別の保存 |
 | `scripts/setup-event.js` | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化 |
 | `scripts/event-status.js` | 当日の状況確認(件数・容量・期限までの残り・HDD の空き。読み取り専用) |
+| `scripts/requeue-failed.js` | 取り込みに失敗したファイルの確認と、`--apply` で `failed/` から取り込み待ちに戻す(件数と ID だけ表示) |
 | `scripts/hash-password.js` | 合言葉のハッシュを作る |
 | `compose.yml` / `ts-config/serve.json` | Tailscale サイドカー(専用ノード、Funnel で 443 公開)+ 窓口。プロジェクト名 `wedding-gw` |
 | `dev/compose.yml` | 開発用 Immich v3.2.4(開発機のローカル専用。本番には使わない) |
@@ -136,6 +138,7 @@ fi
 #    TS_AUTHKEY / SESSION_SECRET / GUEST_PASSWORD_HASH / CLOSES_AT を埋める
 #    (任意)ADMIN_PASSWORD_HASH = 幹事用の合言葉(ゲストとは別)。この合言葉で入るとどの写真も削除できる
 #    CLOSES_AT は余裕を持たせる(後から延ばすと全員の再ログインが必要。docs/guest-gateway.md「困ったとき」)
+#    (任意)LOGIN_MAX_FAILURES / LOGIN_LOCK_MINUTES = ログイン試行制限(既定 20 回 / 2 分。速度検証の結果で調整)
 openssl rand -hex 32                                         # → SESSION_SECRET
 docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
 read -rs P && printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js; unset P
@@ -205,7 +208,10 @@ docker compose -p wedding-gw logs --tail 20 guest-gateway   # immich_ok(version 
 スマホから 1 枚上げ、画面に「アルバムに追加しました」と出て、Immich のアルバムに入ることを確認する。
 
 ログの見方: `import_done`(取り込み成功)、`import_retry`(Immich 側の一時的な失敗、自動で再試行)、
-`import_failed`(諦めた。Immich が拒否した or 約 1 日の再試行上限)。窓口を再起動しても取り込み待ちの分は続きから再開する。
+`import_failed`(諦めた。Immich が拒否した or 約 1 日の再試行上限。ファイルはステージングの `failed/` に残る)。
+窓口を再起動しても取り込み待ちの分は続きから再開する。失敗した分は原因を直してから
+`docker exec guest_gateway node scripts/requeue-failed.js --apply` で取り込み待ちに戻し、窓口を作り直す
+(手順は [docs/guest-gateway.md](../docs/guest-gateway.md) の「困ったとき」)。
 件数の確認は `docker exec guest_gateway node scripts/event-status.js`(読み取り専用。件数・容量・期限までの残り・
 HDD の空きを表示し、取り込みの詰まりや失敗があれば ⚠️ を出す)。当日の手順は
 [docs/guest-gateway.md](../docs/guest-gateway.md#当日の運用)。
