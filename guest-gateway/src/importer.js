@@ -125,9 +125,11 @@ export function createImporter({
         log('error', 'import_unexpected_error', { id: uploadId, error: err?.message });
       }
       if (PERMANENT_STATUSES.has(status) || attempts >= maxAttempts) {
+        // Move the file before marking the row failed: requeue-failed.js only picks up failed
+        // rows, so it never sees one whose file is still on its way to failed/.
+        await setAside(uploadId);
         store.markFailed(uploadId);
         log('error', 'import_failed', { id: uploadId, status, attempts });
-        await setAside(uploadId);
         return 'done';
       }
       log('warn', 'import_retry', { id: uploadId, status, attempts });

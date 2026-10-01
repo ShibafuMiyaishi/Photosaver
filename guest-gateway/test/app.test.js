@@ -262,6 +262,15 @@ describe('login lockout tuning', () => {
     await delay(700);
     expect((await login(srv.baseUrl)).res.status).toBe(200);
   });
+
+  it('still counts malformed requests in the outer rate limit (30 per window)', async () => {
+    for (let i = 0; i < 30; i += 1) {
+      expect((await login(srv.baseUrl, PASSWORD, '')).res.status).toBe(400);
+    }
+    expect((await login(srv.baseUrl, PASSWORD, '')).res.status).toBe(429);
+    // The limit is per address, so it blocks valid logins from there too.
+    expect((await login(srv.baseUrl)).res.status).toBe(429);
+  });
 });
 
 describe('login body deadline', () => {
