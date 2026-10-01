@@ -59,6 +59,8 @@ function canShareFiles() {
 
 const thumbQueue = [];
 let thumbsInFlight = 0;
+// Thumbnails that used up their retries (e.g. Immich's thumbnail job lagging behind a burst).
+const failedThumbs = new Set();
 
 function jitter(ms) {
   return Math.round(ms * (0.5 + Math.random()));
@@ -93,7 +95,11 @@ function loadThumb({ img, asset, attempt }) {
     };
     img.onerror = () => {
       resolve();
-      if (attempt >= THUMB_RETRY_MS.length) return;
+      if (attempt >= THUMB_RETRY_MS.length) {
+        // Out of retries: the next refresh (or 「更新」) starts this tile over.
+        failedThumbs.add(img);
+        return;
+      }
       setTimeout(
         () => enqueueThumb({ img, asset, attempt: attempt + 1 }),
         jitter(THUMB_RETRY_MS[attempt]),
@@ -126,9 +132,18 @@ function renderGrid(list) {
   $('gallery-count').textContent = `${list.length} 件`;
   $('gallery-empty').hidden = list.length > 0;
   const signature = listSignature(list);
-  if (signature === renderedSignature) return;
+  if (signature === renderedSignature) {
+    // Same tiles: only give the thumbnails that gave up another chance.
+    for (const img of failedThumbs) {
+      if (img.isConnected)
+        enqueueThumb({ img, asset: img.parentElement.gwThumb.asset, attempt: 0 });
+    }
+    failedThumbs.clear();
+    return;
+  }
   renderedSignature = signature;
   assets = list;
+  failedThumbs.clear();
 
   const grid = $('grid');
   thumbObserver.disconnect();
