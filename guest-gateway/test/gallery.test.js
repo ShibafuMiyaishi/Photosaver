@@ -45,12 +45,21 @@ function fakeImmich() {
     calls,
     // Pages keyed by cursor (null = first page).
     pages: new Map([[null, { items: IMMICH_ITEMS, nextCursor: null }]]),
+    // Pages for direction 'asc' (defaults to the same as desc).
+    ascPages: null,
+    assetCount: IMMICH_ITEMS.length,
     listError: null,
     media: null,
+    async getAlbum(id) {
+      calls.album = (calls.album ?? 0) + 1;
+      if (this.listError) throw this.listError;
+      return { id, assetCount: this.assetCount };
+    },
     async listAlbumAssets(query) {
       calls.list.push(query);
       if (this.listError) throw this.listError;
-      return this.pages.get(query.cursor);
+      const pages = query.direction === 'asc' && this.ascPages ? this.ascPages : this.pages;
+      return pages.get(query.cursor);
     },
     async fetchMedia(request) {
       calls.media.push(request);
@@ -104,7 +113,9 @@ describe('gallery relay', () => {
     store.markImported('u3', 'duplicate', A2);
 
     const res = await get('/api/assets');
-    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('cache-control')).toBe('private, no-cache');
+    // fetch() decompresses transparently; the header shows the list was sent gzipped.
+    expect(res.headers.get('content-encoding')).toBe('gzip');
     const body = await res.json();
     expect(body).toEqual({
       assets: [
@@ -147,7 +158,56 @@ describe('gallery relay', () => {
       ],
     });
     expect(JSON.stringify(body)).not.toContain('secret');
-    expect(immich.calls.list).toEqual([{ albumId: ALBUM, cursor: null, size: 1000 }]);
+    expect(immich.calls.list).toEqual([
+      { albumId: ALBUM, cursor: null, size: 1000, direction: 'desc' },
+    ]);
+  });
+
+  it('answers 304 when the list did not change', async () => {
+    const first = await get('/api/assets');
+    const etag = first.headers.get('etag');
+    expect(etag).toBeTruthy();
+    // Raw request: fetch() adds Cache-Control: no-cache to manual conditional requests,
+    // which (correctly) disables 304s; browsers revalidating on their own do not.
+    const { hostname, port } = new URL(srv.baseUrl);
+    const status = await new Promise((resolve, reject) => {
+      http
+        .get(
+          {
+            hostname,
+            port,
+            path: '/api/assets',
+            headers: { Cookie: cookie, 'If-None-Match': etag, 'Accept-Encoding': 'gzip' },
+            agent: false,
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode);
+          },
+        )
+        .on('error', reject);
+    });
+    expect(status).toBe(304);
+  });
+
+  it('re-lists in the other direction until the album count is reached', async () => {
+    const at = (id) => ({ id, type: 'IMAGE', fileCreatedAt: '2026-10-10T03:00:00.000Z' });
+    // Tied capture times: the desc listing repeats A2 and never returns A3.
+    immich.pages = new Map([
+      [null, { items: [at(A2), at(A1)], nextCursor: 'c1' }],
+      ['c1', { items: [at(A2)], nextCursor: null }],
+    ]);
+    immich.ascPages = new Map([[null, { items: [at(A3), at(A1), at(A2)], nextCursor: null }]]);
+    const { assets } = await (await get('/api/assets')).json();
+    expect(assets.map((a) => a.id).sort()).toEqual([A1, A2, A3].sort());
+    expect(immich.calls.list.map((c) => c.direction)).toEqual(['desc', 'desc', 'asc']);
+  });
+
+  it('stops after a bounded number of passes when the count is never reached', async () => {
+    immich.assetCount = 99;
+    const { assets } = await (await get('/api/assets')).json();
+    expect(assets).toHaveLength(3);
+    expect(immich.calls.list).toHaveLength(4);
   });
 
   it('merges all pages, drops duplicates across page boundaries and sorts stably', async () => {
@@ -167,6 +227,7 @@ describe('gallery relay', () => {
     await Promise.all([get('/api/assets'), get('/api/assets'), get('/api/assets')]);
     await get('/api/assets');
     expect(immich.calls.list).toHaveLength(1);
+    expect(immich.calls.album).toBe(1);
   });
 
   it('hides Immich failures and does not cache them', async () => {
@@ -194,7 +255,11 @@ describe('gallery relay', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('webp-bytes');
     expect(res.headers.get('content-type')).toBe('image/webp');
-    expect(res.headers.get('cache-control')).toBe('private, max-age=86400');
+    // The test server closes in one hour: browsers may not keep media past the deadline.
+    const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get('cache-control'))[1]);
+    expect(res.headers.get('cache-control')).toMatch(/^private, max-age=\d+$/);
+    expect(maxAge).toBeGreaterThan(3500);
+    expect(maxAge).toBeLessThanOrEqual(3600);
     expect(res.headers.get('set-cookie')).toBeNull();
     expect(res.headers.get('x-immich-internal')).toBeNull();
     expect(res.headers.get('content-disposition')).toBeNull();
@@ -223,7 +288,10 @@ describe('gallery relay', () => {
 
   it('serves originals as attachments only with ?download=1 and only reuses safe filenames', async () => {
     let disposition = "inline; filename*=UTF-8''IMG_0001%20(1).HEIC";
-    immich.media = () => new Response('x', { headers: { 'content-disposition': disposition } });
+    immich.media = () =>
+      new Response('x', {
+        headers: { 'content-type': 'image/heic', 'content-disposition': disposition },
+      });
     expect((await get(`/media/${A1}/original`)).headers.get('content-disposition')).toBeNull();
     expect((await get(`/media/${A1}/original?download=1`)).headers.get('content-disposition')).toBe(
       "attachment; filename*=UTF-8''IMG_0001%20(1).HEIC",
@@ -254,15 +322,48 @@ describe('gallery relay', () => {
     expect(notInAlbum.status).toBe(404);
     expect(await notInAlbum.json()).toEqual({ error: 'not_found' });
 
-    immich.media = () => {
-      throw new ImmichError('media', 416);
-    };
-    expect((await get(`/media/${A2}/video`, { Range: 'bytes=999-' })).status).toBe(416);
+    immich.media = () =>
+      new Response(null, { status: 416, headers: { 'content-range': 'bytes */100' } });
+    const badRange = await get(`/media/${A2}/video`, { Range: 'bytes=999-' });
+    expect(badRange.status).toBe(416);
+    expect(badRange.headers.get('content-range')).toBe('bytes */100');
 
     immich.media = () => {
       throw new ImmichError('media', 0);
     };
     expect((await get(`/media/${A1}/preview`)).status).toBe(502);
+  });
+
+  it('downloads non-image/video content instead of rendering it inline', async () => {
+    immich.media = () =>
+      new Response('<svg onload="alert(1)"/>', {
+        headers: {
+          'content-type': 'image/svg+xml',
+          'content-disposition': "inline; filename*=UTF-8''logo.svg",
+        },
+      });
+    const res = await get(`/media/${A1}/original`);
+    expect(res.headers.get('content-type')).toBe('application/octet-stream');
+    expect(res.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''logo.svg");
+  });
+
+  it('limits parallel media streams per device and releases the slots', async () => {
+    const pending = [];
+    immich.media = () =>
+      new Promise((resolve) => {
+        pending.push(() =>
+          resolve(new Response('x', { headers: { 'content-type': 'image/webp' } })),
+        );
+      });
+    const first = Array.from({ length: 16 }, () => get(`/media/${A1}/thumbnail`));
+    await expect.poll(() => pending.length).toBe(16);
+    const extra = await get(`/media/${A1}/thumbnail`);
+    expect(extra.status).toBe(429);
+    expect(extra.headers.get('retry-after')).toBe('2');
+    for (const release of pending) release();
+    await Promise.all(first);
+    immich.media = () => new Response('x', { headers: { 'content-type': 'image/webp' } });
+    await expect.poll(async () => (await get(`/media/${A1}/thumbnail`)).status).toBe(200);
   });
 
   it('aborts the upstream transfer when the guest disconnects', async () => {

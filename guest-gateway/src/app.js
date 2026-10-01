@@ -279,7 +279,12 @@ export function createApp(config, { store, importer, immich } = {}) {
   });
 
   if (immich && store) {
-    const gallery = createGalleryRouter({ immich, store, albumId: config.immich.albumId });
+    const gallery = createGalleryRouter({
+      immich,
+      store,
+      albumId: config.immich.albumId,
+      closesAt: config.closesAt,
+    });
     app.use(['/api/assets', '/media'], requireSession);
     app.use(gallery);
   }

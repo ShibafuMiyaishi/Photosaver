@@ -288,4 +288,38 @@ describe('createImmichClient', () => {
     }
     expect(fake.requests).toHaveLength(0);
   });
+
+  it('forwards only well-formed single ranges and relays 416 with its Content-Range', async () => {
+    fake = await startFake((req, res) => {
+      if (req.headers.range === 'bytes=999-') {
+        res.writeHead(416, { 'content-range': 'bytes */10' });
+        return res.end();
+      }
+      return res.end('x');
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    for (const range of ['bytes=-', 'bytes=-500', 'bytes=0-', 'bytes=1-2-3']) {
+      await client.fetchMedia({ kind: 'original', id: ASSET, range });
+    }
+    expect(fake.requests.map((r) => r.headers.range)).toEqual([
+      undefined,
+      'bytes=-500',
+      'bytes=0-',
+      undefined,
+    ]);
+    const res = await client.fetchMedia({ kind: 'video', id: ASSET, range: 'bytes=999-' });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe('bytes */10');
+  });
+
+  it('lists in ascending order on request', async () => {
+    fake = await startFake((_req, res) =>
+      json(res, 200, { assets: { items: [], nextCursor: null } }),
+    );
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    await client.listAlbumAssets({ albumId: ALBUM, direction: 'asc' });
+    await client.listAlbumAssets({ albumId: ALBUM, direction: 'sideways' });
+    const bodies = fake.requests.map((r) => JSON.parse(r.body).orderBy.direction);
+    expect(bodies).toEqual(['asc', 'desc']);
+  });
 });

@@ -61,11 +61,14 @@ export function openStore(dbPath, { now = Date.now } = {}) {
     WHERE device_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`);
   // Uploader per asset: the first guest whose upload created it (duplicates point to the same
   // asset but do not make it theirs).
-  const uploaderOf = (count) =>
-    db.prepare(`
+  const uploaderSql = (count) => `
       SELECT asset_id, nickname, device_id FROM uploads
       WHERE status = 'created' AND asset_id IN (${Array(count).fill('?').join(', ')})
-      ORDER BY created_at, rowid`);
+      ORDER BY created_at, rowid`;
+  // Full chunks reuse one prepared statement; only the last, shorter chunk is prepared ad hoc.
+  const uploaderFullChunk = db.prepare(uploaderSql(UPLOADER_CHUNK));
+  const uploaderOf = (count) =>
+    count === UPLOADER_CHUNK ? uploaderFullChunk : db.prepare(uploaderSql(count));
   const pending = db.prepare(
     "SELECT * FROM uploads WHERE status = 'pending' ORDER BY created_at, rowid",
   );
@@ -127,17 +130,17 @@ export function openStore(dbPath, { now = Date.now } = {}) {
     },
 
     /**
-     * Who uploaded these assets through the gateway: Map assetId → { nickname, mine }.
+     * Who uploaded these assets through the gateway: Map assetId → { nickname, deviceId }.
      * Assets added another way (e.g. the Immich app) are absent.
      */
-    uploaders(assetIds, deviceId) {
+    uploaders(assetIds) {
       const result = new Map();
       // Chunked: a whole album can hold thousands of ids.
       for (let i = 0; i < assetIds.length; i += UPLOADER_CHUNK) {
         const chunk = assetIds.slice(i, i + UPLOADER_CHUNK);
         for (const row of uploaderOf(chunk.length).all(...chunk)) {
           if (result.has(row.asset_id)) continue;
-          result.set(row.asset_id, { nickname: row.nickname, mine: row.device_id === deviceId });
+          result.set(row.asset_id, { nickname: row.nickname, deviceId: row.device_id });
         }
       }
       return result;

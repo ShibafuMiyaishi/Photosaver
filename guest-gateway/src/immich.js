@@ -15,8 +15,10 @@ const MEDIA_PATHS = {
   original: (id) => `assets/${id}/original`,
 };
 export const MEDIA_KINDS = Object.keys(MEDIA_PATHS);
-// Only a single, simple byte range is forwarded.
-const RANGE = /^bytes=\d{0,15}-\d{0,15}$/;
+// Only a single, simple byte range ("a-", "a-b" or the suffix "-n") is forwarded.
+const RANGE = /^bytes=(?:\d{1,15}-\d{0,15}|-\d{1,15})$/;
+// Statuses relayed to the guest; 416 keeps Content-Range so players can recover.
+const MEDIA_STATUSES = new Set([200, 206, 416]);
 
 export class ImmichError extends Error {
   /**
@@ -160,15 +162,16 @@ export function createImmichClient({
 
     /**
      * One page of the album's assets, newest first.
-     * @param {{ albumId: string, cursor?: string|null, size?: number }} query
+     * @param {{ albumId: string, cursor?: string|null, size?: number,
+     *   direction?: 'desc'|'asc' }} query
      */
-    async listAlbumAssets({ albumId, cursor = null, size = 200 }) {
+    async listAlbumAssets({ albumId, cursor = null, size = 200, direction = 'desc' }) {
       if (!isUuid(albumId)) throw new ImmichError('list', 0);
       const json = {
         // The v3.2 filter format returns trashed assets unless trashedAt is constrained
         // (verified against a real v3.2.4); deleted photos must not reappear in the gallery.
         filter: { albumIds: { any: [albumId] }, trashedAt: { eq: null } },
-        orderBy: { field: 'fileCreatedAt', direction: 'desc' },
+        orderBy: { field: 'fileCreatedAt', direction: direction === 'asc' ? 'asc' : 'desc' },
         size,
         ...(cursor ? { cursor } : {}),
       };
@@ -181,7 +184,7 @@ export function createImmichClient({
     /**
      * Open a media stream for one album asset. Only the wait for response headers is time-limited;
      * the body may stream for as long as the guest keeps downloading (abort via `signal`).
-     * Resolves with the upstream Response (200/206); anything else throws ImmichError.
+     * Resolves with the upstream Response (200/206/416); anything else throws ImmichError.
      * @param {{ kind: 'thumbnail'|'preview'|'video'|'original', id: string, range?: string,
      *   signal?: AbortSignal }} request
      */
@@ -213,7 +216,7 @@ export function createImmichClient({
       } finally {
         clearTimeout(headerTimer);
       }
-      if (res.status !== 200 && res.status !== 206) {
+      if (!MEDIA_STATUSES.has(res.status)) {
         signal?.removeEventListener('abort', onAbort);
         await res.body?.cancel().catch(() => {});
         throw new ImmichError('media', res.status);

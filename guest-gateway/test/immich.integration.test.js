@@ -147,7 +147,10 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
   it('relays album media and refuses assets outside the album', async () => {
     const page = await client.listAlbumAssets({ albumId: event.albumId });
     const [asset] = page.items;
-    const thumb = await client.fetchMedia({ kind: 'thumbnail', id: asset.id });
+    // Thumbnails are generated asynchronously: a fresh upload answers 404 for a moment.
+    const thumb = await waitFor(() =>
+      client.fetchMedia({ kind: 'thumbnail', id: asset.id }).catch(() => null),
+    );
     expect(thumb.headers.get('content-type')).toMatch(/^image\//);
     await thumb.body.cancel();
     const part = await client.fetchMedia({ kind: 'original', id: asset.id, range: 'bytes=0-3' });

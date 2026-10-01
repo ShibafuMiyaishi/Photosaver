@@ -80,13 +80,23 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   No server body-size limit, no chunked/resumable upload in Immich.
 - EXIF dates override the client `fileCreatedAt`; sending `File.lastModified` is enough.
 - List: `POST /api/search/metadata` with
-  `{"filter":{"albumIds":{"any":[ALBUM_ID]}},"orderBy":{"field":"fileCreatedAt","direction":"desc"},"size":200,"cursor":<nextCursor>}`
+  `{"filter":{"albumIds":{"any":[ALBUM_ID]},"trashedAt":{"eq":null}},"orderBy":{"field":"fileCreatedAt","direction":"desc"},"size":1000,"cursor":<nextCursor>}`
   → `assets.items`, `assets.nextCursor` (null = end). Do not mix with the legacy flat fields (400).
-  `/timeline/*` is internal API — avoid.
-- Album meta: `GET /api/albums/{id}` (no assets in v3 response).
-- Thumb/preview: `GET /api/assets/{id}/thumbnail?size=thumbnail|preview` (may 302 — follow or rewrite).
-- Video: `GET /api/assets/{id}/video/playback` (forward `Range`; client needs `<video playsinline>`).
-- Original: `GET /api/assets/{id}/original`.
+  `/timeline/*` is internal API — avoid. Verified against a real v3.2.4 (2026-10-01):
+  - without `trashedAt:{eq:null}` trashed assets are returned too;
+  - `size` max 1000; `orderBy.field` only `fileCreatedAt` / `localDateTime` (others → 400);
+  - `fileCreatedAt` is stored in whole seconds and `nextCursor` is an offset (`{"offset":N}`), so
+    tied rows reorder between queries: pages can repeat AND skip assets. `src/gallery.js` lists all
+    pages, dedups, re-lists in the other direction until `assetCount` is reached, sorts by
+    (time, id) itself. Never expose Immich cursors to clients.
+  - items carry `width`/`height`/`thumbhash`/`duration` (ms number)/`originalFileName` plus internal
+    fields (`originalPath`, `ownerId`, `checksum`...) that must not reach guests.
+- Album meta: `GET /api/albums/{id}` (no assets in v3 response). `assetCount` excludes trashed assets.
+- Thumb/preview: `GET /api/assets/{id}/thumbnail?size=thumbnail|preview` — 200 with the image, no
+  redirect (verified; the client uses `redirect: 'error'`). 404 for a moment after upload until the
+  thumbnail job has run. Assets outside the shared-link album → 400.
+- Video: `GET /api/assets/{id}/video/playback` (forward `Range` → 206; client needs `<video playsinline>`).
+- Original: `GET /api/assets/{id}/original` (`Range` → 206; `Content-Disposition: inline; filename*=UTF-8''…`).
 - ZIP: `POST /api/download/info` `{albumId, archiveSize}` → for each archive
   `POST /api/download/archive` `{assetIds}` (streamed zip).
 - Delete: `DELETE /api/assets` `{ids:[...]}` with `x-api-key` (no `force` → goes to trash).

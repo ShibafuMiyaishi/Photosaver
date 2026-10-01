@@ -75,10 +75,20 @@ describe('upload store', () => {
     store.markImported('again', 'duplicate', asset);
     store.add({ ...ROW, uploadId: 'pending' });
 
-    expect(store.uploaders([asset, 'unknown'], 'dev-1')).toEqual(
-      new Map([[asset, { nickname: 'はなこ', mine: false }]]),
+    expect(store.uploaders([asset, 'unknown'])).toEqual(
+      new Map([[asset, { nickname: 'はなこ', deviceId: 'dev-2' }]]),
     );
-    expect(store.uploaders([asset], 'dev-2').get(asset).mine).toBe(true);
-    expect(store.uploaders([], 'dev-1').size).toBe(0);
+    expect(store.uploaders([]).size).toBe(0);
+  });
+
+  it('looks up albums larger than one query chunk', () => {
+    const ids = Array.from({ length: 1201 }, (_, i) => `asset-${i}`);
+    ids.forEach((assetId, i) => {
+      store.add({ ...ROW, uploadId: `u${i}`, nickname: `n${i}` });
+      store.markImported(`u${i}`, 'created', assetId);
+    });
+    const found = store.uploaders(ids);
+    expect(found.size).toBe(1201);
+    expect(found.get('asset-1200').nickname).toBe('n1200');
   });
 });
