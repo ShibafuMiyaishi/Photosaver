@@ -33,6 +33,24 @@ docker compose ps    # healthy 確認
   Immich のバージョン整合モデルとも相性が悪い)。更新通知だけ欲しければ
   [GitHub リリースの Atom フィード](https://github.com/immich-app/immich/releases.atom) を購読
 
+## compose 設定の反映(リポジトリの `server/` を変更したとき)
+
+本番の compose は `/srv/photosaver/` に**コピーして**使っている(new-server-setup.md 手順 8)。
+リポジトリ側の `server/docker-compose.yml` が更新されたら、差分を確認してから反映する:
+
+```bash
+git -C /srv/photosaver/repo pull --ff-only
+diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml   # 何が変わるか確認
+cp /srv/photosaver/repo/server/docker-compose.yml /srv/photosaver/
+cd /srv/photosaver && docker compose up -d    # 変更のあったサービスだけ作り直される(数十秒止まる)
+docker compose ps                             # healthy 確認
+```
+
+- `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)
+- 内部ネットワーク `photosaver_gw`(guest-gateway 用)はこの compose が作る。窓口が動いている間は
+  Immich 側を `docker compose down` しても残るが、窓口が止まっていれば消える。窓口は必ず Immich の
+  **後に**起動する(先に起動すると `photosaver_gw ... could not be found` で失敗する)
+
 ## 容量管理
 
 ```bash

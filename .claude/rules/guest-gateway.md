@@ -33,11 +33,21 @@ Immich itself stays tailnet-only. Do not extend album-guard for this; it is a ne
 guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   → ts sidecar (tailscale/tailscale, tag:wedding-gw, TS_SERVE_CONFIG with AllowFunnel)
   → guest-gateway (network_mode: service:<ts sidecar>, listens on 127.0.0.1:8080)
-  → external docker network `photosaver_default` → http://immich-server:2283
+  → internal docker network `photosaver_gw` (external to this project) → http://immich-server:2283
 ```
 
+- `photosaver_gw` is declared in `server/docker-compose.yml` (delta 5: `internal: true`, only
+  `immich-server` joins). Redis and Postgres must never join it — the gateway is public-facing
+  and, inside the Immich stack, must reach only the immich-server API (owner decision 2026-10-01).
+  It still has internet/LAN egress through the sidecar's own default network (needed by Tailscale). Do not switch the
+  gateway to `photosaver_default`.
+- Import settings come from `${GW_DATA_DIR}/immich.env` (written by `scripts/setup-event.js`,
+  loaded via `env_file` with `required: false`); without it the gateway runs in speed-test mode.
+  Upload records live in sqlite at `${GW_DATA_DIR}/db` (NVMe, owned by uid 1000).
+
 - Separate compose project under `guest-gateway/` (run with `-p wedding-gw`). Do NOT add it to
-  `server/docker-compose.yml` (that file keeps exactly three deltas from upstream).
+  `server/docker-compose.yml` (that file keeps only its listed deltas from upstream; the
+  `photosaver_gw` network is the one gateway-related delta).
 - Kill switch: `docker compose -p wedding-gw down`. NEVER suggest `tailscale funnel reset` or
   `tailscale serve reset` on the host as a way to stop the gateway.
 - Sidecar uses the default userspace networking (`TS_USERSPACE=true`), so the gateway process

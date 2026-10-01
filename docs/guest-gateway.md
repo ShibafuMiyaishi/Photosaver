@@ -1,7 +1,7 @@
 # ゲスト用アップロード窓口(guest-gateway)
 
-> **状態: 開発中(2026-10)**。最初の利用は友達の結婚式。現在は速度検証版
-> (受信と計測のみ。Immich への取り込みは未実装)。コードと手順: [guest-gateway/](../guest-gateway/README.md)
+> **状態: 開発中(2026-10)**。最初の利用は友達の結婚式。現在はアップロード → アルバムへの取り込みまで実装済み
+> (閲覧・削除は未実装)。コードと手順: [guest-gateway/](../guest-gateway/README.md)
 > 本ページは設計と運用手順のまとめ。実装の詳細ルールは `.claude/rules/guest-gateway.md`。
 
 ## 何をするものか
@@ -37,9 +37,14 @@ Immich のアカウントも Tailscale も持っていない**イベントのゲ
 [Tailscale 専用ノード(コンテナ)] tag:wedding-gw
   ▼
 [guest-gateway] Node 24 ─ 合言葉の確認、tus で分割アップロード受信、決めた操作だけ中継
-  ▼  docker network: photosaver_default
+  ▼  内部ネットワーク photosaver_gw(immich-server だけが参加。Redis・Postgres には届かない)
 [Immich] ← 今まで通り tailnet 内だけ(ミニPC本体の 443 serve は触らない)
 ```
+
+- 窓口と Immich をつなぐ `photosaver_gw` は、Immich 本体の compose(`server/docker-compose.yml`)が作る
+  外部への出口のない内部ネットワーク。窓口が乗っ取られても、Immich 一式の中で届くのは
+  immich-server の API だけ(Redis・Postgres には届かない)。窓口自体は Tailscale のために
+  インターネットへは出られる
 
 - ミニPC本体とは**別の Tailscale ノード**として公開する。URL にポート番号が付かず、
   ミニPC(Immich)のホスト名も出ない
@@ -67,7 +72,7 @@ Immich のアカウントも Tailscale も持っていない**イベントのゲ
 
 ### 1. 事前確認(読み取りのみ)
 
-Immich のバージョン、docker ネットワーク名(`photosaver_default`)、Tailscale のバージョン、
+Immich のバージョン、docker ネットワーク(`photosaver_gw` が反映済みか)、Tailscale のバージョン、
 HDD の空き、マウント確認用マーカーの位置を確認する。詳細は `tasks.md` の T1。
 
 ### 2. Tailscale 管理画面
@@ -84,7 +89,8 @@ HDD の空き、マウント確認用マーカーの位置を確認する。詳�
 ### 3. 速度の事前検証(最重要)
 
 Funnel の帯域上限は非公開のため、**実機で測って採否を決める**。
-速度検証版のデプロイ手順は [guest-gateway/README.md](../guest-gateway/README.md#速度検証版のデプロイミニpc--自宅pcから-ssh-で実施)。
+デプロイ手順は [guest-gateway/README.md](../guest-gateway/README.md#デプロイミニpc--自宅pcから-ssh-で実施)
+(Immich の接続情報 `immich.env` を置かなければ、受信して削除するだけの速度検証モードで動く)。
 
 | テスト | 内容 |
 |---|---|

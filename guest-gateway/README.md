@@ -79,7 +79,7 @@ rm -rf ../tmp/dev-immich                    # ライブラリも消す場合
 ```bash
 docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
 read -rs IMMICH_ADMIN_PASSWORD && export IMMICH_ADMIN_PASSWORD
-docker run --rm --network photosaver_default -v /srv/photosaver/guest-gateway:/out \
+docker run --rm --network photosaver_gw -v /srv/photosaver/guest-gateway:/out \
   -e IMMICH_URL=http://immich-server:2283 -e IMMICH_ADMIN_EMAIL=<管理者メール> -e IMMICH_ADMIN_PASSWORD \
   guest-gateway node scripts/setup-event.js --name '<アルバム名>' --event-email <専用ユーザーのメール> \
   --expires 2026-10-31T23:59:00+09:00 --out /out/immich.env
@@ -94,13 +94,24 @@ unset IMMICH_ADMIN_PASSWORD
 - 専用ユーザーのパスワードはどこにも保存・表示しない(`immich.env` にはメールアドレスだけ)。
   その専用ユーザーでログインする必要が出たら、Immich の管理画面でパスワードをリセットする
 - `immich.env` の値(共有リンクキー・削除キー)は表示・コミットしない(`guest-gateway/.gitignore` で `*.env` を除外済み)
+- コンテナは uid 1000(node)で動き、書き出した `immich.env` は uid 1000 の権限 600 になる。compose を
+  実行するミニPCのユーザーも uid 1000 であること(`id -u` が 1000。Ubuntu の最初のユーザーは通常そう)。
+  違う場合はここで止めて相談する
 - 削除キーの影響範囲: Immich の `asset.delete` 権限は `force: true` の完全削除や `POST /trash/empty` も
   許すため、漏れると専用ユーザーが所有する全写真・動画を完全に消せる(窓口自身は `force` を送らない)
 
-## 速度検証版のデプロイ(ミニPC / 自宅PCから SSH で実施)
+## デプロイ(ミニPC / 自宅PCから SSH で実施)
 
-前提: Tailscale 管理画面の設定(`tag:wedding-gw` と funnel の許可)と認証キーの発行が済んでいること
-([docs/guest-gateway.md](../docs/guest-gateway.md) の準備手順 2)。
+前提:
+- Tailscale 管理画面の設定(`tag:wedding-gw` と funnel の許可)と認証キーの発行が済んでいること
+  ([docs/guest-gateway.md](../docs/guest-gateway.md) の準備手順 2)
+- Immich 本体が内部ネットワーク `photosaver_gw` 付きの compose で起動していること
+  (`docker network inspect photosaver_gw` が成功する。未反映なら
+  [docs/operations.md](../docs/operations.md) の「compose 設定の反映」)。窓口はこのネットワーク経由で
+  `immich-server:2283` だけに届く
+
+`immich.env` が無い状態で起動すると**速度検証モード**(受信して削除するだけ)。イベント用に取り込むには
+下の「取り込みモードに切り替える」を行う。
 
 ```bash
 # 1. コードを更新
@@ -111,8 +122,9 @@ git -C /srv/photosaver/repo pull --ff-only
 #    そこに書き込まれてしまう。HDD 上にだけあるマーカーで確認してから作る
 #    ('HDD not mounted' と出たらここで中止し、HDD のマウントを先に直す)
 if test -f /mnt/photo/.photosaver.mount-ok; then
-  mkdir -p /srv/photosaver/guest-gateway /mnt/photo/guest-gateway/staging
-  sudo chown 1000:1000 /mnt/photo/guest-gateway/staging   # コンテナは uid 1000 (node) で動く
+  mkdir -p /srv/photosaver/guest-gateway/db /mnt/photo/guest-gateway/staging
+  # コンテナは uid 1000 (node) で動く。db/ は取り込みの記録(NVMe)
+  sudo chown 1000:1000 /mnt/photo/guest-gateway/staging /srv/photosaver/guest-gateway/db
 else
   echo 'HDD not mounted'
 fi
@@ -155,3 +167,19 @@ docker compose -p wedding-gw down
 ```
 
 ⚠️ ミニPC本体で `tailscale funnel reset` / `tailscale serve reset` は使わない(Immich の tailnet 公開も消える)。
+
+### 取り込みモードに切り替える
+
+1. 「イベント用の Immich 準備(本番)」で `scripts/setup-event.js` を実行し、
+   `--out /out/immich.env`(= ホストの `/srv/photosaver/guest-gateway/immich.env`、権限 600)に書き出す。
+   `--expires` は `CLOSES_AT` より後(余裕を持たせる)にする
+2. 窓口を作り直す(`immich.env` を読み込ませる):
+   ```bash
+   docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml \
+     --env-file /srv/photosaver/guest-gateway/.env up -d --build --force-recreate guest-gateway
+   docker compose -p wedding-gw logs --tail 20 guest-gateway   # immich_ok(version 3.2.4 以上)を確認
+   ```
+3. スマホから1枚上げ、画面に「アルバムに追加しました」と出て、Immich のアルバムに入ることを確認する
+
+ログの見方: `import_done`(取り込み成功)、`import_retry`(Immich 側の一時的な失敗、自動で再試行)、
+`import_failed`(諦めた。Immich が拒否した or 再試行上限)。窓口を再起動しても取り込み待ちの分は続きから再開する。
