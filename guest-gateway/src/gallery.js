@@ -32,10 +32,15 @@ const IMMICH_DISPOSITION = /^inline; filename\*=UTF-8''([A-Za-z0-9%._~!'()*-]{1,
 const INLINE_TYPE = /^(?:image\/(?!svg)[a-z0-9.+-]+|video\/[a-z0-9.+-]+)$/i;
 // Asset bytes never change for an id; browsers may keep them, but never past the deadline.
 const MEDIA_MAX_AGE_S = 86_400;
-// Parallel media responses per device (a grid loads many thumbnails at once) and parallel
-// original/video streams in total (each holds an Immich connection and HDD reads).
-const MEDIA_PER_DEVICE = 16;
+// Parallel media responses (429 + Retry-After beyond these). Thumbnails/previews are small and
+// a grid over HTTP/2 asks for many at once; originals/videos hold an Immich connection and HDD
+// reads for long, so they get a small per-device share of a global pool.
+const LIGHT_PER_DEVICE = 48;
+const HEAVY_PER_DEVICE = 4;
 const HEAVY_STREAMS_TOTAL = 32;
+// A heavy stream that moves no bytes for this long (paused <video>, stalled or idle reader) is
+// closed so it cannot hold a slot forever; players re-request with Range when resumed.
+const HEAVY_IDLE_MS = 60_000;
 
 /** The only asset fields a guest needs (Immich also returns owner ids, internal paths, ...). */
 function toGuestAsset(asset, uploader, deviceId) {
@@ -68,13 +73,22 @@ function compareAssets(a, b) {
  *   albumId: string,
  *   closesAt: number,
  *   now?: () => number,
+ *   heavyIdleMs?: number,
  * }} deps
  */
-export function createGalleryRouter({ immich, store, albumId, closesAt, now = Date.now }) {
+export function createGalleryRouter({
+  immich,
+  store,
+  albumId,
+  closesAt,
+  now = Date.now,
+  heavyIdleMs = HEAVY_IDLE_MS,
+}) {
   const router = express.Router();
   // { at, promise } of the last full listing, shared by all guests. `at` is set when the
   // listing completes, so a slow listing stays single-flight until it is done.
   let cache = null;
+  // deviceId → { light, heavy } responses in flight.
   const mediaInFlight = new Map();
   let heavyInFlight = 0;
 
@@ -154,23 +168,27 @@ export function createGalleryRouter({ immich, store, albumId, closesAt, now = Da
     if (!isUuid(id) || !MEDIA_KINDS.includes(kind)) return next();
 
     const { deviceId } = req.gwSession;
-    const heavy = kind === 'original' || kind === 'video';
-    const deviceCount = mediaInFlight.get(deviceId) ?? 0;
-    if (deviceCount >= MEDIA_PER_DEVICE || (heavy && heavyInFlight >= HEAVY_STREAMS_TOTAL)) {
+    const slot = kind === 'original' || kind === 'video' ? 'heavy' : 'light';
+    const counts = mediaInFlight.get(deviceId) ?? { light: 0, heavy: 0 };
+    const full =
+      slot === 'light'
+        ? counts.light >= LIGHT_PER_DEVICE
+        : counts.heavy >= HEAVY_PER_DEVICE || heavyInFlight >= HEAVY_STREAMS_TOTAL;
+    if (full) {
       res.set('Retry-After', '2');
       return res.status(429).json({ error: 'busy' });
     }
-    mediaInFlight.set(deviceId, deviceCount + 1);
-    if (heavy) heavyInFlight += 1;
+    counts[slot] += 1;
+    mediaInFlight.set(deviceId, counts);
+    if (slot === 'heavy') heavyInFlight += 1;
 
     // Stop the upstream transfer as soon as the guest goes away; release the slots once.
     const controller = new AbortController();
     res.once('close', () => {
       controller.abort();
-      const left = (mediaInFlight.get(deviceId) ?? 1) - 1;
-      if (left > 0) mediaInFlight.set(deviceId, left);
-      else mediaInFlight.delete(deviceId);
-      if (heavy) heavyInFlight -= 1;
+      counts[slot] -= 1;
+      if (counts.light === 0 && counts.heavy === 0) mediaInFlight.delete(deviceId);
+      if (slot === 'heavy') heavyInFlight -= 1;
     });
 
     let upstream;
@@ -222,8 +240,18 @@ export function createGalleryRouter({ immich, store, albumId, closesAt, now = Da
     body.once('error', () => {
       upstreamFailed = !controller.signal.aborted;
     });
+    const piping = pipeline(body, res);
+    if (slot === 'heavy') {
+      // Reset on every chunk that moves; under backpressure no chunks flow, so a reader that
+      // stopped reading is closed after heavyIdleMs. Attached after pipeline() so no chunk can
+      // flow before the response is wired up.
+      const idle = setTimeout(() => res.destroy(), heavyIdleMs);
+      idle.unref();
+      body.on('data', () => idle.refresh());
+      res.once('close', () => clearTimeout(idle));
+    }
     try {
-      await pipeline(body, res);
+      await piping;
     } catch (err) {
       if (upstreamFailed) log('warn', 'media_stream_interrupted', { kind, error: err.message });
     }

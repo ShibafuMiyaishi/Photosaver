@@ -284,6 +284,7 @@ export function createApp(config, { store, importer, immich } = {}) {
       store,
       albumId: config.immich.albumId,
       closesAt: config.closesAt,
+      heavyIdleMs: config.mediaIdleMs,
     });
     app.use(['/api/assets', '/media'], requireSession);
     app.use(gallery);

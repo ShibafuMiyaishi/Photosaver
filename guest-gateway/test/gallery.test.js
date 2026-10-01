@@ -347,23 +347,43 @@ describe('gallery relay', () => {
     expect(res.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''logo.svg");
   });
 
-  it('limits parallel media streams per device and releases the slots', async () => {
+  function holdMedia(contentType) {
     const pending = [];
     immich.media = () =>
       new Promise((resolve) => {
         pending.push(() =>
-          resolve(new Response('x', { headers: { 'content-type': 'image/webp' } })),
+          resolve(new Response('x', { headers: { 'content-type': contentType } })),
         );
       });
-    const first = Array.from({ length: 16 }, () => get(`/media/${A1}/thumbnail`));
-    await expect.poll(() => pending.length).toBe(16);
+    return pending;
+  }
+
+  it('allows many parallel thumbnails per device, then answers 429 and releases the slots', async () => {
+    const pending = holdMedia('image/webp');
+    const first = Array.from({ length: 48 }, () => get(`/media/${A1}/thumbnail`));
+    await expect.poll(() => pending.length).toBe(48);
     const extra = await get(`/media/${A1}/thumbnail`);
     expect(extra.status).toBe(429);
     expect(extra.headers.get('retry-after')).toBe('2');
+    // Heavy streams have their own budget.
+    const video = get(`/media/${A2}/video`);
+    await expect.poll(() => pending.length).toBe(49);
     for (const release of pending) release();
-    await Promise.all(first);
+    await Promise.all([...first, video]);
     immich.media = () => new Response('x', { headers: { 'content-type': 'image/webp' } });
     await expect.poll(async () => (await get(`/media/${A1}/thumbnail`)).status).toBe(200);
+  });
+
+  it('limits originals/videos to a few per device', async () => {
+    const pending = holdMedia('video/mp4');
+    const first = Array.from({ length: 4 }, () => get(`/media/${A2}/video`));
+    await expect.poll(() => pending.length).toBe(4);
+    expect((await get(`/media/${A1}/original`)).status).toBe(429);
+    // Thumbnails still reach Immich (they use the light budget).
+    const thumb = get(`/media/${A1}/thumbnail`);
+    await expect.poll(() => pending.length).toBe(5);
+    for (const release of pending) release();
+    await Promise.all([...first, thumb]);
   });
 
   it('aborts the upstream transfer when the guest disconnects', async () => {
@@ -417,5 +437,48 @@ describe('gallery in speed-test mode', () => {
     expect((await fetch(`${srv.baseUrl}/media/${A1}/thumbnail`, { headers })).status).toBe(404);
     const session = await (await fetch(`${srv.baseUrl}/api/session`, { headers })).json();
     expect(session.gallery).toBe(false);
+  });
+});
+
+describe('gallery heavy stream idle timeout', () => {
+  let srv;
+  let store;
+  let upstreamSignal;
+  beforeEach(async () => {
+    store = openStore(':memory:');
+    const immich = {
+      async getAlbum() {
+        return { assetCount: 0 };
+      },
+      async listAlbumAssets() {
+        return { items: [], nextCursor: null };
+      },
+      async fetchMedia({ signal }) {
+        upstreamSignal = signal;
+        // One chunk, then silence: like a paused <video> that stopped reading.
+        const body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('first chunk'));
+          },
+        });
+        return new Response(body, { headers: { 'content-type': 'video/mp4' } });
+      },
+    };
+    srv = await startServer(
+      { immich: { albumId: ALBUM }, mediaIdleMs: 150 },
+      { store, importer: { enqueue() {} }, immich },
+    );
+  });
+  afterEach(async () => {
+    await srv.close();
+    store.close();
+  });
+
+  it('closes a video stream that stops moving and frees the upstream connection', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const res = await fetch(`${srv.baseUrl}/media/${A2}/video`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    await expect(res.text()).rejects.toThrow();
+    await expect.poll(() => upstreamSignal.aborted).toBe(true);
   });
 });

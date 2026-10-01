@@ -125,6 +125,17 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 9. Logs: method, route, status, duration, short hash of deviceId. Never keys, cookies, passwords.
 10. After the deadline: all routes show the closed page / 410, staging dir is purged.
 
+## Gallery relay contract (src/gallery.js)
+
+- `GET /api/assets` returns the whole album at once (`{assets:[...]}`, gzip, ETag + `no-cache`);
+  no client paging. `mine` = uploaded from the caller's device (created, not duplicate).
+- `GET /media/:id/thumbnail|preview|video|original` (`?download=1` on original → attachment).
+  In-flight limits: 48 thumbnail/preview per device; 4 video/original per device and 32 in total.
+  Beyond that → **429 + `Retry-After: 2`**; the UI must retry (plain `<img>` does not).
+  A video/original stream that moves no bytes for 60 s is closed (players re-request with Range).
+- A fresh upload's thumbnail is 404 until Immich's thumbnail job ran: show a placeholder
+  (thumbhash) and retry later.
+
 ## Client-side gotchas (iOS especially)
 
 - No `capture` attribute (iOS opens camera only). `accept="image/*,video/*"` — do NOT list `image/heic`.
