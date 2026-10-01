@@ -151,6 +151,37 @@ sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /mnt/photo).timer
 > | `/mnt/photo/.photosaver.mount-ok` | guest-gateway(無いと起動・受付しない)、手動の確認 | この手順 6 |
 > | `/mnt/photo/immich-library/.photosaver.mount-ok` | compose の `mount-guard`(`UPLOAD_LOCATION` を見る。無いと Immich が起動しない) | 手順 8 |
 
+### Docker の起動を HDD マウントの後にする(systemd drop-in)
+
+OS 起動時、Docker は `restart: always` のコンテナを**自分で**再起動する。このとき compose の
+`depends_on` は使われないため **mount-guard は走らない**。さらに `nofail` の HDD は起動の待ち合わせ
+対象から外れる(`local-fs.target` の前に並ばない)ので、Docker が HDD のマウントより先に起動しうる。
+その場合 immich-server の bind mount はシステムディスク上に空の `/mnt/photo/immich-library` を作って掴む。
+これを防ぐため、Docker の起動を `/mnt/photo` のマウント処理の後に並べる:
+
+```bash
+systemd-escape -p --suffix=mount /mnt/photo     # → mnt-photo.mount(fstab から自動生成されるユニット名)
+sudo mkdir -p /etc/systemd/system/docker.service.d
+printf '[Unit]\nAfter=mnt-photo.mount\n' | sudo tee /etc/systemd/system/docker.service.d/photosaver-mount.conf
+sudo systemctl daemon-reload                    # Docker の再起動は不要(次回起動から効く)
+systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount   # 1 行出れば OK
+```
+
+- `After=` は**順序だけ**の指定。起動時に `mnt-photo.mount` のマウント処理が走っていれば、それが
+  **成功か失敗で終わるまで** Docker の起動を待たせる。HDD が認識されない場合はデバイス待ちの
+  タイムアウト(既定で 90 秒程度)の後にマウントが失敗し、Docker はそのまま起動する
+  (終了時は逆順になり、Docker が止まってからアンマウントされる)
+- `Requires=` / `RequiresMountsFor=` は**使わない**。これらはマウント失敗時に Docker 自体を起動させない
+  (`RequiresMountsFor=` は `Requires=` + `After=` と同じ)。HDD が壊れても OS・Docker・SSH は動いて
+  いてほしい(DB ダンプの確認や復旧作業のため)ので、順序付けだけにする
+- それでも HDD が無いまま Docker が起動した場合の第 2 の防御は Immich 自身の起動時チェック
+  ([System Integrity](https://docs.immich.app/administration/system-integrity)):
+  一度正常に起動した Immich は、各メディアフォルダの `.immich` ファイルが読めないと
+  起動を中止する(`Failed to read: ...` を出して終了 → `restart: always` で再起動を繰り返す)。
+  写真がシステムディスクに書かれることはないが、Immich は HDD を戻すまで使えない。
+  空の `/mnt/photo/immich-library` はシステムディスク側に残るが、HDD を再マウントすれば隠れて無害。
+  (挙動は Immich v3.2.4 のソースで確認。実機での再現は未確認)
+
 ## 7. Tailscale
 
 ```bash
@@ -239,6 +270,11 @@ crontab -e
 # 追記: 0 3 * * * /srv/photosaver/scripts/sync-db-dumps.sh >> /var/tmp/photosaver-dbsync.log 2>&1
 ```
 
+スクリプトは `rsync --delete` でミラーするため、HDD 未マウント時にミラーまで空にしないよう、
+`immich-library/.photosaver.mount-ok` が無いとき・`backups/` に `immich-db-backup-*.sql.gz` が
+1 つも無いときは**何もせずエラー終了**する(ログに `ERROR: ... ミラーは変更しない` が出る)。
+初回の DB ダンプ(02:00)より前に動いた回はこのエラーになるが無害。
+
 ## 10. 友達の招待手順(node sharing — 無料枠を消費しない)
 
 自分の tailnet に「ユーザー」として招待すると無料枠(6人)を使うが、
@@ -268,6 +304,7 @@ crontab -e
 ## 11. 完成チェックリスト
 
 - [ ] 再起動テスト: `sudo reboot` 後、何も操作せず Immich にアクセスできる
+- [ ] Docker が HDD マウントの後に起動する設定: `systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount` が 1 行出る(手順 6)
 - [ ] マーカー 2 つが存在する: `ls -la /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok`
 - [ ] HDD 抜きテスト: `docker compose down` → `sudo umount /mnt/photo` → `docker compose up -d` で
   `docker compose logs mount-guard` に `FATAL: photo drive not mounted` が出て immich-server が起動しない

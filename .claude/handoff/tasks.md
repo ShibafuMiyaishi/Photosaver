@@ -106,10 +106,16 @@ Status: READY (after T1). Needs user approval: `immich_server` is recreated (ten
 `photosaver_gw`, the only network the gateway shares with Immich (Redis/Postgres stay off it).
 Follow **`docs/operations.md` → 「compose 設定の反映」**:
 
+0. Precondition (read-only): `findmnt /mnt/photo` shows the HDD, and
+   `test -f /mnt/photo/immich-library/.photosaver.mount-ok` succeeds. If either fails, STOP and report
+   — do not continue: `mount-guard` would fail and `docker compose up -d` would not start Immich.
+   Never create the marker here.
 1. `git -C /srv/photosaver/repo pull --ff-only` (stop and report if dirty/diverged).
 2. Show the user `diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml`.
-   Expected: only the header comment item 5, the comment lines above `mount-guard` (comment-only),
-   the `networks:` block under `immich-server`, and the top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
+   Expected: only the header comment item 5, the header comment block 「上記以外の小さな違い」
+   (comment-only lines: `name`, `IMMICH_VERSION` default, long-form `depends_on`, Valkey digest /
+   healthcheck), the comment lines above `mount-guard` (comment-only), the `networks:` block under
+   `immich-server`, and the top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
 3. With approval, follow the operations.md block exactly: back up the current file
    (`docker-compose.yml.bak`), record `docker inspect -f '{{.Name}} {{.State.StartedAt}}' immich_postgres immich_redis`,
    `cp` the file, `docker compose config -q && docker compose up -d` (if `config -q` fails, restore
@@ -120,6 +126,55 @@ Follow **`docs/operations.md` → 「compose 設定の反映」**:
    → `true immich_server ` (only that container until the gateway starts).
 
 Report: `reports/YYYY-MM-DD-T2b.md` (pass/fail, no hostnames/IPs). Commit + push.
+
+---
+
+## T2c — 再起動時の起動順と DB ダンプ同期の安全化
+
+Status: READY (after T1; independent of T2/T3). Needs user approval: step 4 uses `sudo`.
+No container is restarted; Immich stays up throughout.
+
+Background (issues #34, #35): on boot the Docker daemon restarts `restart: always` containers itself,
+ignoring compose `depends_on`, so `mount-guard` does not run; with `nofail` the HDD mount is not
+ordered before `local-fs.target`, so Docker may start before `/mnt/photo` is mounted and the bind
+mount would create an empty `/mnt/photo/immich-library` on the system disk. Separately,
+`sync-db-dumps.sh` ran `rsync --delete` even when the HDD was missing, which could empty the NVMe
+mirror. Human-facing details: `docs/new-server-setup.md` step 6 「Docker の起動を HDD マウントの後にする」
+and `docs/operations.md`.
+
+1. `git -C /srv/photosaver/repo pull --ff-only` (stop and report if dirty/diverged).
+2. Precondition (read-only): `findmnt /mnt/photo` shows the HDD and
+   `test -f /mnt/photo/immich-library/.photosaver.mount-ok` succeeds; otherwise STOP and report.
+3. DB dump mirror script (installed at `/srv/photosaver/scripts/` by new-server-setup.md step 8;
+   cron runs it daily at 03:00):
+   - Show the user `diff /srv/photosaver/scripts/sync-db-dumps.sh /srv/photosaver/repo/server/scripts/sync-db-dumps.sh`
+     (expected: only the new marker / dump checks and comments). If the server copy has local edits, STOP and ask.
+   - `cp /srv/photosaver/repo/server/scripts/sync-db-dumps.sh /srv/photosaver/scripts/` (overwriting keeps
+     the executable bit; check with `ls -l`, `chmod +x` if missing).
+   - Run it once by hand the way cron does and record the exit code:
+     `/srv/photosaver/scripts/sync-db-dumps.sh >> /var/tmp/photosaver-dbsync.log 2>&1; echo "exit=$?"`,
+     then `tail -3 /var/tmp/photosaver-dbsync.log`. Expected: `exit=0` and a `synced N dump(s)` line.
+     `exit=1` with `ERROR: ... ミラーは変更しない` means the marker or the dumps are missing — report it
+     (the mirror was left untouched). Also `crontab -l | grep sync-db-dumps` (cron entry present?) and
+     `ls -lt /srv/photosaver/db-dumps | head -3`.
+4. With approval, install the systemd drop-in (ordering only; do NOT use `Requires=` /
+   `RequiresMountsFor=` — a dead HDD must not keep Docker or the OS from booting):
+   ```bash
+   systemd-escape -p --suffix=mount /mnt/photo      # must print mnt-photo.mount; STOP if not
+   sudo mkdir -p /etc/systemd/system/docker.service.d
+   printf '[Unit]\nAfter=mnt-photo.mount\n' | sudo tee /etc/systemd/system/docker.service.d/photosaver-mount.conf
+   sudo systemctl daemon-reload
+   ```
+   Do NOT restart Docker (the drop-in takes effect at the next boot). Do not touch `/etc/fstab`.
+5. Verify: `systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount` prints one line,
+   `systemctl cat docker` shows the drop-in at the end, and `docker compose -f /srv/photosaver/docker-compose.yml ps`
+   still shows every Immich service healthy.
+   Optional, only if the user wants it now (Immich is offline for a few minutes): `sudo reboot`, then
+   check Immich works and `journalctl -b -u mnt-photo.mount -u docker --no-pager | head -40` shows the
+   mount finishing before Docker starts.
+
+Report: `reports/YYYY-MM-DD-T2c.md` (pass/fail per step, script exit code and the sanitized log line,
+no hostnames/IPs). Commit + push.
 
 ---
 

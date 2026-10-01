@@ -7,7 +7,8 @@
 - 自動で動いているもの: OS のセキュリティ自動更新(docker 除外・04:00 自動再起動)、
   Immich の日次 DB ダンプ(02:00)、DB ダンプの NVMe ミラー(03:00 cron)、
   Btrfs 月次 scrub
-- コンテナは `restart: always` で電源断・再起動から自動復帰する
+- コンテナは `restart: always` で電源断・再起動から自動復帰する。このとき mount-guard は走らないため、
+  Docker 自体を HDD のマウント処理の後に起動させている(new-server-setup.md 手順 6 の systemd drop-in)
 
 ## 月次: Immich アップデート(15 分)
 
@@ -27,6 +28,10 @@ docker compose ps    # healthy 確認
 ```
 
 - `.env` は `IMMICH_VERSION=v3` なので v3 系の範囲で安全に追従する
+- このときに Redis(Valkey)のイメージ digest と healthcheck を公式 compose に合わせる
+  (リポジトリの `server/docker-compose.yml` を公式の最新版と diff し、ヘッダー注記どおり redis の 2 か所を
+  直してコミット → 下の「compose 設定の反映」で反映)。Redis コンテナが作り直されるが、更新作業中の
+  停止の範囲内なので問題ない
 - **v4 が出たら**: リリースノートと移行ガイドを読んでから `.env` を `v4` に上げる。
   順序は「スマホアプリが先・サーバーが後」
 - **自動更新ツール(Watchtower 等)は使わない**(Watchtower は開発終了。
@@ -56,11 +61,15 @@ docker inspect -f '{{.Name}} {{.State.StartedAt}}' immich_postgres immich_redis 
 - `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)。`server/.env.example` に新しい変数が
   増えていたら、`diff` で確認して `.env` に手で追記する
 - `server/scripts/` が変わっていたら同様に `cp` する
+  (例: `cp /srv/photosaver/repo/server/scripts/sync-db-dumps.sh /srv/photosaver/scripts/`。上書きなら実行権限は残る)
 - 内部ネットワーク `photosaver_gw`(guest-gateway 用、差分 5)はこの compose が作る。窓口が動いている間は
   Immich 側を `docker compose down` しても残るが、窓口が止まっていれば消える。窓口は必ず Immich の
   **後に**起動する(先に起動すると `photosaver_gw ... could not be found` で失敗する)。
   反映後の確認: `docker network inspect photosaver_gw --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}'`
   → `true immich_server`(窓口が動いていれば `guest_gateway_ts` も並ぶ)
+- 窓口が動いている間に Immich 側で `docker compose down` すると、最後に `photosaver_gw` を消そうとして
+  「network ... has active endpoints」というエラーが出る。ネットワークは窓口のために残るだけで、
+  Immich のコンテナは止まっている。**想定どおりで失敗ではない**(次の `up -d` はそのまま使える)
 
 ## 容量管理
 
@@ -119,6 +128,8 @@ tailscale serve status                         # 443 → 2283 転送が生きて
 sudo btrfs scrub status /mnt/photo             # 直近 scrub でエラー 0?
 sudo smartctl -H /dev/sda                      # HDD の SMART 健康状態
 ls -lt /srv/photosaver/db-dumps | head -3      # DB ダンプミラーが更新されてる?
+tail -3 /var/tmp/photosaver-dbsync.log         # ミラーの直近結果(ERROR なら HDD かダンプを確認)
+systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount   # Docker が HDD マウント後に起動する設定が生きてる?
 ```
 
 scrub がエラーを報告した場合: 該当ファイルは壊れている(修復用の複製は無い)。
@@ -132,6 +143,8 @@ HDD 交換のサイン。
 | 友達「写真が上がらない」 | ①友達のスマホの Tailscale がオンか ②クォータ超過(管理→サーバー統計)③サーバー稼働(`docker compose ps`) |
 | ts.net URL で繋がらない | `tailscale status`、`tailscale serve status`。Machines 画面で key expiry が切れていないか |
 | Immich が起動しない(`docker compose logs mount-guard` に `FATAL: photo drive not mounted`) | `lsblk` で HDD 認識確認 → `sudo mount -a` → `/mnt/photo/immich-library/.photosaver.mount-ok` の存在確認(mount-guard が見るのはこちら)→ `docker compose up -d` |
+| 再起動後に immich-server が再起動を繰り返す(`docker compose logs immich-server` に `Failed to read: ... .immich`) | 起動時に HDD がマウントされていない(Immich 自身の起動時チェックで止まっている。写真は書かれていない)。`findmnt /mnt/photo` → `lsblk` で HDD 確認 → `sudo mount -a` → `cd /srv/photosaver && docker compose up -d`。drop-in(new-server-setup.md 手順 6)が入っているかも確認 |
+| DB ダンプミラーのログに `ERROR: ... ミラーは変更しない` | HDD 未マウント(マーカー無し)か、`backups/` にダンプが無い。ミラーは前回のまま残っている。HDD を確認し、管理 → 設定 → バックアップでダンプが作られているか確認 |
 | guest-gateway が起動しない・受付が止まる | `/mnt/photo/.photosaver.mount-ok` の存在確認(窓口が見るのはこちら)。詳細は [guest-gateway.md](guest-gateway.md#困ったとき) |
 | Web が 500/真っ白 | `docker compose logs -f immich-server`。DB unhealthy なら `docker compose logs database` |
 | ML/検索が重い・落ちる | ML はバッチ処理なので一時停止可: 管理 → ジョブ で Smart Search を一時停止 |
