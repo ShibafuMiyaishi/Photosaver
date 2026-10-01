@@ -12,6 +12,13 @@
     <main>
       <h1>写真・動画アップロード</h1>
 
+      <p id="loading" class="muted" role="status">読み込み中…</p>
+
+      <section id="load-error" hidden>
+        <p class="error" role="alert">読み込めませんでした。電波の良い場所で再度お試しください。</p>
+        <button id="load-retry" type="button">再読み込み</button>
+      </section>
+
       <section id="login" hidden>
         <form id="login-form">
           <label for="nickname">ニックネーム(誰が撮ったか分かるように)</label>
@@ -44,7 +51,8 @@
         <div id="upload-pane">
           <p class="notice" role="status">
             アップロード中は<strong>この画面を開いたまま</strong>にしてください。<br />
-            画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。
+            画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。<br />
+            電波が途切れたときも、つながり次第自動で続きから再開します。
           </p>
 
           <label class="pick">

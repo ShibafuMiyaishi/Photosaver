@@ -186,6 +186,13 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
 - iOS suspends the page on lock/app switch → tus resume on `visibilitychange`, Screen Wake Lock,
   persistent "keep this screen open" banner. tus `chunkSize` 50 MB (keeps Cloudflare fallback viable),
   long `retryDelays`, fingerprint = name+size+deviceId, `removeFingerprintOnSuccess: true`.
+- Upload failures (`public/upload-retry.js`): tus' default `onShouldRetry` gives up at once while
+  `navigator.onLine` is false, so ours keeps its status rules without that check. Transient
+  (network, 5xx but 507, 408/409/423/429) → re-queued automatically while visible (5 s → 60 s cap,
+  ±20% jitter, 10 per item), on `online` and on `visibilitychange`; permanent (507, other 4xx)
+  never; 401 waits for the re-login. The queue pauses while offline / logged out instead of
+  failing item after item. A re-queued item gets a fresh `tus.Upload` (tus resets its retry
+  counter only after progress) that resumes via the stored fingerprint.
 - Large downloads: direct navigation (`<a href>`), never fetch→blob of big files (Safari
   WebKitBlobResource error / tab killed). Exceptions, all size-capped: share-sheet saves (a File must
   be in memory) and Android bulk (blob → `<a download>`, one file at a time, ≤ 500 MB).

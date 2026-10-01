@@ -49,6 +49,8 @@ const mode = saveMode();
 let bulk = null;
 // Asset whose original the save button is fetching right now (first tap).
 let preparingId = null;
+// True while the share sheet of a single save is open.
+let sharing = false;
 
 function mediaUrl(asset, kind) {
   return `/media/${encodeURIComponent(asset.id)}/${kind}`;
@@ -256,6 +258,11 @@ async function onSave(button, asset) {
     return;
   }
   if (ready) {
+    // A second tap while the sheet is open would make share() fail (InvalidStateError) and
+    // switch this photo to a Files download. share() stays the first await (the tap's gesture).
+    if (sharing) return;
+    sharing = true;
+    button.disabled = true;
     try {
       await navigator.share({ files: [ready] });
       prepared.clear();
@@ -273,6 +280,9 @@ async function onSave(button, asset) {
         const shown = currentAsset();
         if (shown) button.textContent = saveLabel(shown);
       }
+    } finally {
+      sharing = false;
+      button.disabled = false;
     }
     return;
   }
