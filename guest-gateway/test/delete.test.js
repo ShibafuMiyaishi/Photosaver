@@ -94,8 +94,9 @@ describe('deleting assets', () => {
       await fetch(`${srv.baseUrl}/api/assets`, { headers: { Cookie: guest } })
     ).json();
     expect(list.assets.map((a) => a.id)).toEqual([THEIRS]);
-    // Deleting again is no longer allowed (the record is marked deleted).
-    expect((await del(srv, guest, MINE)).status).toBe(403);
+    // Ownership survives the delete (only marked), so a restored photo stays deletable.
+    expect(ctx.store.isOwnAsset(MINE, deviceOf(guest))).toBe(true);
+    expect(ctx.store.wasDeleted(MINE)).toBe(true);
   });
 
   it('lets the organiser delete anything with the admin password', async () => {

@@ -142,9 +142,12 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   fingerprint of the hash and are demoted to guest when it changes): any asset in the current
   album listing → else 404. Never `force` (goes to the event user's trash). Immich 400/404 → 404;
   401/403/5xx → logged `asset_delete_failed` + 502 (a bad key must not look like success).
-  Success marks rows `deleted` and drops the shared listing cache.
+  Success sets `deleted_at` on the rows (statuses stay, so a restore in Immich brings ownership
+  and attribution back) and drops the shared listing cache.
 - Re-uploading a file whose asset was trashed returns `duplicate` with the trashed id and does NOT
-  re-add it to the album (verified v3.2.4); the importer records it as `trashed` and the UI says so.
+  re-add it to the album (verified v3.2.4). `GET /api/assets/{id}` with the share key answers 200
+  for album assets and 400 for trashed ones (verified): the importer uses it to record `trashed`
+  (UI explains) or, if the organiser restored it, a normal `duplicate` + clears `deleted_at`.
   The share key cannot restore from trash — the organiser restores in Immich.
 
 ## Client-side gotchas (iOS especially)

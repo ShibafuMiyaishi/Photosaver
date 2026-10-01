@@ -6,10 +6,12 @@
 import { DatabaseSync } from 'node:sqlite';
 
 // pending: waiting for / retrying the Immich upload. created / duplicate: in the album.
-// failed: given up (the staged file is gone). deleted: the asset was moved to Immich's trash.
-// trashed: re-uploaded after it was deleted here; Immich matches the trashed copy (verified on
-// v3.2.4) and does not put it back in the album.
-export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'deleted', 'trashed'];
+// failed: given up (the staged file is gone).
+// trashed: re-uploaded while the asset sat in Immich's trash after a delete here; Immich matches
+// the trashed copy (verified on v3.2.4) and does not put it back in the album.
+// Deleting an asset does not change the status: `deleted_at` marks it instead, so ownership and
+// attribution come back on their own if the organiser restores it from the trash in Immich.
+export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'trashed'];
 const UPLOADER_CHUNK = 500;
 
 const SCHEMA = `
@@ -24,6 +26,7 @@ CREATE TABLE IF NOT EXISTS uploads (
   status        TEXT NOT NULL DEFAULT 'pending',
   asset_id      TEXT,
   attempts      INTEGER NOT NULL DEFAULT 0,
+  deleted_at    INTEGER,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -39,6 +42,12 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Databases created before deleted_at existed (development/test runs).
+  const columns = db
+    .prepare('PRAGMA table_info(uploads)')
+    .all()
+    .map((c) => c.name);
+  if (!columns.includes('deleted_at')) db.exec('ALTER TABLE uploads ADD COLUMN deleted_at INTEGER');
 
   const insert = db.prepare(`
     INSERT OR IGNORE INTO uploads
@@ -75,10 +84,13 @@ export function openStore(dbPath, { now = Date.now } = {}) {
     "SELECT 1 FROM uploads WHERE asset_id = ? AND device_id = ? AND status = 'created' LIMIT 1",
   );
   const deletedAsset = db.prepare(
-    "SELECT 1 FROM uploads WHERE asset_id = ? AND status = 'deleted' LIMIT 1",
+    'SELECT 1 FROM uploads WHERE asset_id = ? AND deleted_at IS NOT NULL LIMIT 1',
   );
   const setDeleted = db.prepare(
-    "UPDATE uploads SET status = 'deleted', updated_at = ? WHERE asset_id = ? AND status IN ('created', 'duplicate')",
+    'UPDATE uploads SET deleted_at = ?, updated_at = ? WHERE asset_id = ?',
+  );
+  const clearDeletedMark = db.prepare(
+    'UPDATE uploads SET deleted_at = NULL, updated_at = ? WHERE asset_id = ?',
   );
   const pending = db.prepare(
     "SELECT * FROM uploads WHERE status = 'pending' ORDER BY created_at, rowid",
@@ -165,12 +177,18 @@ export function openStore(dbPath, { now = Date.now } = {}) {
       return ownCreated.get(assetId, deviceId) !== undefined;
     },
 
-    /** The asset went to Immich's trash: it no longer belongs to anyone's uploads. */
+    /** The asset went to Immich's trash through the gateway. */
     markDeleted(assetId) {
-      setDeleted.run(now(), assetId);
+      const t = now();
+      setDeleted.run(t, t, assetId);
     },
 
-    /** True when this asset was deleted through the gateway (it sits in Immich's trash). */
+    /** The organiser restored it in Immich (seen again in the album). */
+    clearDeleted(assetId) {
+      clearDeletedMark.run(now(), assetId);
+    },
+
+    /** True when this asset was deleted through the gateway and not seen restored since. */
     wasDeleted(assetId) {
       return deletedAsset.get(assetId) !== undefined;
     },
