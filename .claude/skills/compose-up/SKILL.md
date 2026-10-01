@@ -1,8 +1,12 @@
 ---
 name: compose-up
-description: Bring up the full HPSS stack (Immich + album-guard) and verify each component is healthy. Runs drive-check, then docker compose build+up, then polls health endpoints. External access is provided by Tailscale running on the host (not a compose service). Use when user says "起動" / "start" / "compose up" / "スタック起動".
+description: FROZEN Windows/album-guard env only, not for the v2 mini PC. Bring up the full HPSS stack (Immich + album-guard) and verify each component is healthy. Runs drive-check, then docker compose build+up, then polls health endpoints. External access is provided by Tailscale running on the host (not a compose service). Use when user says "起動" / "start" / "compose up" / "スタック起動".
 allowed-tools: Bash(docker *), Bash(curl *), Bash(test *)
 ---
+
+> **FROZEN — old Windows + Docker Desktop + album-guard env only (Phase A/B, `immich/`).**
+> Not for the v2 mini PC (Ubuntu, `server/`, `/mnt/photo`) or guest-gateway. Before running,
+> tell the user this targets the frozen env and confirm they really mean it (see `CLAUDE.md`).
 
 Start the full stack and confirm each component reaches a healthy state.
 
@@ -55,5 +59,5 @@ Suggest the user run `/test-auth` to verify the full auth flow.
 
 ## Reference
 
-- Troubleshooting: `@docs/operations.md`
+- Troubleshooting: `@docs/legacy/README.md` (old-env docs; `docs/operations.md` is for v2)
 - Env variables: `immich/.env.example`

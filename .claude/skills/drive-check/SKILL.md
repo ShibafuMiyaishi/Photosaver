@@ -1,8 +1,12 @@
 ---
 name: drive-check
-description: Validate that the external drive holding photo data and album-passwords.json is mounted, writable, has adequate free space, and is shared with Docker Desktop. Run this before any stack-start, album-add, or backup operation. Use when user asks "ドライブ確認" / "drive check" / or before `/compose-up`.
+description: FROZEN Windows/album-guard env only, not for the v2 mini PC. Validate that the external drive holding photo data and album-passwords.json is mounted, writable, has adequate free space, and is shared with Docker Desktop. Run this before any stack-start, album-add, or backup operation. Use when user asks "ドライブ確認" / "drive check" / or before `/compose-up`.
 allowed-tools: Bash(*)
 ---
+
+> **FROZEN — old Windows + Docker Desktop + album-guard env only (Phase A/B, `immich/`).**
+> Not for the v2 mini PC (Ubuntu, `server/`, `/mnt/photo`) or guest-gateway. Before running,
+> tell the user this targets the frozen env and confirm they really mean it (see `CLAUDE.md`).
 
 Validate the external drive at the configured path (default `E:/Photo`, overridable via
 `PHOTO_STORAGE_PATH` env).
@@ -54,4 +58,4 @@ Validate the external drive at the configured path (default `E:/Photo`, overrida
 
 ## Reference
 
-See `@docs/external-drive.md` for the full setup guide.
+See `@docs/legacy/external-drive.md` for the full setup guide.

@@ -131,19 +131,25 @@ UUID=<メモした UUID>  /mnt/photo  btrfs  defaults,noatime,nofail  0  0
 
 ```bash
 sudo systemctl daemon-reload && sudo mount -a
-sudo chown $USER:$USER /mnt/photo
+findmnt /mnt/photo    # HDD がマウントされていることを確認(何も出なければここで止める)
 
-# マウント検証用マーカーファイル(compose の mount-guard が確認する)
-touch /mnt/photo/.photosaver.mount-ok
+# 以下は HDD がマウントされているときだけ実行される(システムディスク側に書かないため)
+# HDD 直下のマウント確認用マーカー(guest-gateway と、運用時の「HDD はマウントされているか」確認が使う)
+findmnt /mnt/photo >/dev/null && sudo chown $USER:$USER /mnt/photo && touch /mnt/photo/.photosaver.mount-ok
 
 # 月次 scrub(ビット腐敗検知)を有効化
 sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /mnt/photo).timer
 ```
 
 > **なぜマーカーファイルか**: HDD が外れた状態で Docker が起動すると、bind mount は
-> 空の `/mnt/photo` ディレクトリを掴んで Immich がそこに書き込んでしまう
-> (壊れたアセットが生まれる)。マーカーは HDD 上にあるので、未マウントなら
-> mount-guard が失敗してスタック全体の起動が止まる。
+> システムディスク上の空のディレクトリを掴んで Immich がそこに書き込んでしまう
+> (壊れたアセットが生まれる)。マーカーは HDD 上にしか無いので、未マウントなら起動を止められる。
+> マーカーは 2 つある:
+>
+> | ファイル | 読むもの | 作る手順 |
+> |---|---|---|
+> | `/mnt/photo/.photosaver.mount-ok` | guest-gateway(無いと起動・受付しない)、手動の確認 | この手順 6 |
+> | `/mnt/photo/immich-library/.photosaver.mount-ok` | compose の `mount-guard`(`UPLOAD_LOCATION` を見る。無いと Immich が起動しない) | 手順 8 |
 
 ## 7. Tailscale
 
@@ -167,29 +173,48 @@ tailscale serve status     # 確認
 `--bg` の設定は**再起動後も永続する**(公式仕様)。URL は
 `https://photosaver.<tailnet名>.ts.net` になる(`tailscale status` で確認)。
 
+Immich は tailnet 内だけに公開する(Funnel・Cloudflare Tunnel・ルーターのポート開放はしない)。
+イベント用の guest-gateway は別ノードで公開するため、**このホストで `tailscale funnel reset` /
+`tailscale serve reset` は実行しない**(Immich の公開設定まで消える)。詳細は [tailscale.md](tailscale.md)。
+
 ## 8. Immich デプロイ
 
 ```bash
 sudo mkdir -p /srv/photosaver && sudo chown $USER:$USER /srv/photosaver
 cd /srv/photosaver
 git clone https://github.com/ShibafuMiyaishi/Photosaver.git repo
-cp -r repo/server/* /srv/photosaver/    # compose 一式を配置
-cd /srv/photosaver
+cp -r repo/server/. /srv/photosaver/   # compose 一式を配置(`.env.example` も含めるため `*` ではなく `.`)
 
-# QSV 用の公式 hwaccel 定義を取得(compose が参照する)
+# QSV 用の公式 hwaccel 定義を取得(compose の extends が参照する。無いと起動できない)
 curl -LO https://github.com/immich-app/immich/releases/latest/download/hwaccel.transcoding.yml
 curl -LO https://github.com/immich-app/immich/releases/latest/download/hwaccel.ml.yml
 
 cp .env.example .env
-nano .env    # DB_PASSWORD を生成して設定(openssl rand -hex 24)
-mkdir -p /mnt/photo/immich-library
+chmod 600 .env
+nano .env    # DB_PASSWORD を生成して設定(openssl rand -hex 24)。他は既定値のままでよい
+
+# 写真ライブラリ(HDD)と mount-guard 用マーカー。マーカーが無いと Immich は起動しない
+# (HDD マウント済みのときだけ作る。未マウントならどれも実行されない)
+test -f /mnt/photo/.photosaver.mount-ok && mkdir -p /mnt/photo/immich-library \
+  && touch /mnt/photo/immich-library/.photosaver.mount-ok
 
 docker compose up -d
 docker compose ps        # 全サービス healthy になるまで待つ(初回は数分)
 ```
 
-> 旧環境からデータを移行する場合は、**ここで止めて** [migration-runbook.md](migration-runbook.md)
-> に従うこと(初回起動前に `backups/` を配置するとリストア画面が使える)。
+`.env` の既定値の意味(変更しない):
+
+- `IMMICH_VERSION=v3` — v3 系のメジャー固定メタタグ。`release` / `latest` にはしない
+- `UPLOAD_LOCATION=/mnt/photo/immich-library` — 写真原本(HDD)
+- `DB_DATA_LOCATION=/srv/photosaver/postgres` — Postgres は**内蔵 NVMe(ext4)**。
+  HDD・Btrfs・NTFS/exFAT・ネットワーク共有には置かない(公式要件)
+
+`server/docker-compose.yml` は公式 compose からの差分 5 点(127.0.0.1 バインド、mount-guard、
+QSV、`DB_STORAGE_TYPE` 未設定、guest-gateway 用内部ネットワーク `photosaver_gw`)をヘッダーに
+列挙している。`photosaver_gw` はこの `docker compose up` で作られる(guest-gateway を使わなければ何もしない)。
+
+> 旧環境からデータを移行する場合は、**`docker compose up -d` の前で止めて**
+> [migration-runbook.md](migration-runbook.md) に従うこと(初回起動前に `backups/` を配置するとリストア画面が使える)。
 
 ## 9. Immich 初期設定(ブラウザで https://<ts.net の URL>)
 
@@ -243,7 +268,14 @@ crontab -e
 ## 11. 完成チェックリスト
 
 - [ ] 再起動テスト: `sudo reboot` 後、何も操作せず Immich にアクセスできる
-- [ ] HDD 抜きテスト: HDD を外して `docker compose up -d` → mount-guard が起動を止める
+- [ ] マーカー 2 つが存在する: `ls -la /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok`
+- [ ] HDD 抜きテスト: `docker compose down` → `sudo umount /mnt/photo` → `docker compose up -d` で
+  `docker compose logs mount-guard` に `FATAL: photo drive not mounted` が出て immich-server が起動しない
+  → `sudo mount -a` → `docker compose up -d` で復帰(未マウント中に Docker がシステムディスク側に
+  空の `immich-library` を作るが、再マウントで隠れるので無害)
+- [ ] `docker compose ps` で全サービス healthy、`.env` が `IMMICH_VERSION=v3`
+- [ ] `df -T /srv/photosaver/postgres` が内蔵 NVMe の ext4 を指している
+- [ ] `docker network inspect photosaver_gw --format '{{.Internal}}'` が `true`(immich-server だけが参加)
 - [ ] スマホの Immich アプリから写真をアップロードできる(Wi-Fi とモバイル回線の両方)
 - [ ] `tailscale serve status` で 443 → 2283 の転送が生きている
 - [ ] 管理画面 → ジョブ でサムネイル生成が完走している

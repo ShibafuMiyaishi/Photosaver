@@ -38,6 +38,9 @@
 
 ## Phase 2 — ファイル転送(NTFS → Btrfs)
 
+前提: [new-server-setup.md](new-server-setup.md) 手順 8 で `/mnt/photo/immich-library/` と
+mount-guard 用マーカー `/mnt/photo/immich-library/.photosaver.mount-ok` を作成済み。
+
 新サーバーに旧外付けドライブを直挿しするのが最速・最簡単
 (Linux の NTFS **読み取り**は kernel ドライバで安定している):
 
@@ -46,15 +49,20 @@ sudo mkdir -p /mnt/ntfs
 sudo mount -t ntfs3 -o ro /dev/sdb2 /mnt/ntfs    # デバイスは lsblk で確認
 rsync -a --info=progress2 /mnt/ntfs/Photo/immich-library/ /mnt/photo/immich-library/
 sudo umount /mnt/ntfs
+
+# mount-guard 用マーカーが残っていることを確認(無いと Immich が起動しない)
+ls -la /mnt/photo/immich-library/.photosaver.mount-ok
 ```
 
 `rsync -a` でタイムスタンプが保持される(Immich のメタデータは DB 側にあるが、
-将来のツール互換のため保持しておく)。
+将来のツール互換のため保持しておく)。`--delete` を付けないこと — 付けると転送先にしか無い
+マーカーが消える。やり直しで `--delete` を使った・ライブラリを丸ごと置き換えた場合は
+`touch /mnt/photo/immich-library/.photosaver.mount-ok` で作り直す。
 
 ## Phase 3 — 新サーバーでリストア
 
 前提: [new-server-setup.md](new-server-setup.md) の手順 8 の途中
-(`.env` 作成まで完了、**まだ `docker compose up` していない**)。
+(`.env` とマーカーの作成まで完了、**まだ `docker compose up` していない**)。
 
 1. `.env` の `IMMICH_VERSION` を **Phase 0 で記録した完全一致バージョン**に固定する
    (例: `IMMICH_VERSION=v3.1.0`)
@@ -111,4 +119,5 @@ External Library 機能は「元のフォルダ構造のまま管理し続けた
 
 - 旧 64GB USB ドライブは初期化して自由に転用してよい
 - Windows 側の Docker Desktop スタックは `docker compose down` で削除
-  (named volume `immich-postgres` も不要になるが、`down -v` は移行検証完了後にのみ実行)
+  (named volume `immich-postgres` も不要になる。⚠️ `docker compose down -v` は旧環境の DB を
+  **復元不能に削除する**ため、Phase 4 の検証がすべて完了してからのみ実行)

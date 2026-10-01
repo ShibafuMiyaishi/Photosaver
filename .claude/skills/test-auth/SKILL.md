@@ -1,8 +1,12 @@
 ---
 name: test-auth
-description: Run the end-to-end album-guard authentication test suite (T1-T7 from HPSS spec section 11.8) — health, passthrough, 401 on unauthed access, successful auth, token-based access, wrong-password rejection, unprotected-album passthrough. Use after `/compose-up` or when user says "認証テスト" / "E2E test" / "verify auth".
+description: FROZEN Windows/album-guard env only, not for the v2 mini PC. Run the end-to-end album-guard authentication test suite (T1-T7 from HPSS spec section 11.8) — health, passthrough, 401 on unauthed access, successful auth, token-based access, wrong-password rejection, unprotected-album passthrough. Use after `/compose-up` or when user says "認証テスト" / "E2E test" / "verify auth".
 allowed-tools: Bash(curl *), Bash(node *), Read
 ---
+
+> **FROZEN — old Windows + Docker Desktop + album-guard env only (Phase A/B, `immich/`).**
+> Not for the v2 mini PC (Ubuntu, `server/`, `/mnt/photo`) or guest-gateway. Before running,
+> tell the user this targets the frozen env and confirm they really mean it (see `CLAUDE.md`).
 
 Execute the E2E auth test suite from the HPSS spec.
 

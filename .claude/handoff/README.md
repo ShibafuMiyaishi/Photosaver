@@ -18,7 +18,7 @@ you are the home PC. On macOS under `/Users/fumiyaishibashi/` you are the Mac.
    Ask the user before anything marked *needs user approval* and before any destructive or
    outward-facing action.
 3. **Home PC → Mac**: write one report per task run to `reports/YYYY-MM-DD-<task-id>.md`
-   (template below), set the task's status in `tasks.md` to `DONE` / `BLOCKED`, commit, push.
+   (template below; create `reports/` on the first report), set the task's status in `tasks.md` to `DONE` / `BLOCKED`, commit, push.
 4. **Mac**: `git pull`, read the reports, continue development, update `tasks.md`.
 
 Only the Mac edits task *definitions*; the home PC only changes the `Status:` line and writes
@@ -41,6 +41,9 @@ pass/fail results and sanitized error messages are fine.
 - Read `CLAUDE.md` first. In particular: never `tailscale funnel reset` / `tailscale serve reset`
   (the host's 443 serve publishes Immich to the tailnet), never `docker compose down -v`,
   never touch `server/docker-compose.yml` deltas, never put Postgres on the HDD.
+- Stop the guest-gateway only with `docker compose -p wedding-gw down`.
+- Never create a mount marker (`.photosaver.mount-ok`) unless `findmnt /mnt/photo` shows the
+  HDD mounted and the user agreed — a marker on the bare mountpoint defeats the guard.
 - Do not upgrade Immich, change the Tailscale policy, or create keys without the user's go-ahead.
 - Secrets go only into `.env` files on the mini PC (mode 600), never into git.
 

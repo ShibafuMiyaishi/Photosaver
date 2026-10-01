@@ -46,10 +46,14 @@ cd /srv/photosaver && docker compose up -d    # 変更のあったサービス�
 docker compose ps                             # healthy 確認
 ```
 
-- `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)
-- 内部ネットワーク `photosaver_gw`(guest-gateway 用)はこの compose が作る。窓口が動いている間は
+- `.env` と `hwaccel.*.yml` はコピーしない(サーバー固有)。`server/.env.example` に新しい変数が
+  増えていたら、`diff` で確認して `.env` に手で追記する
+- `server/scripts/` が変わっていたら同様に `cp` する
+- 内部ネットワーク `photosaver_gw`(guest-gateway 用、差分 5)はこの compose が作る。窓口が動いている間は
   Immich 側を `docker compose down` しても残るが、窓口が止まっていれば消える。窓口は必ず Immich の
-  **後に**起動する(先に起動すると `photosaver_gw ... could not be found` で失敗する)
+  **後に**起動する(先に起動すると `photosaver_gw ... could not be found` で失敗する)。
+  反映後の確認: `docker network inspect photosaver_gw --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}'`
+  → `true immich_server`(窓口が動いていれば `guest_gateway_ts` も並ぶ)
 
 ## 容量管理
 
@@ -66,11 +70,30 @@ docker system df          # Docker 側の肥大確認
 
 ### HDD 増設・交換の手順(概要)
 
-1. 新 HDD を Btrfs でフォーマット(new-server-setup.md 手順 6 と同様)
-2. `docker compose stop` → 旧 HDD から新 HDD へ `rsync -a`
-3. fstab の UUID を差し替え、`/mnt/photo` に新 HDD をマウント
-4. マーカーファイル `touch /mnt/photo/.photosaver.mount-ok` を忘れずに
-5. `docker compose up -d` → 動作確認後、旧 HDD は退役
+1. 新 HDD を Btrfs でフォーマット(new-server-setup.md 手順 6 と同様)し、仮の場所(例: `/mnt/photo-new`)にマウント
+2. 窓口が動いていれば `docker compose -p wedding-gw down`、Immich は `docker compose stop`
+3. `rsync -a --info=progress2 /mnt/photo/ /mnt/photo-new/`(`/mnt/photo` 以下を丸ごと。マーカー 2 つも一緒にコピーされる)
+4. fstab の UUID を差し替え、`/mnt/photo` に新 HDD をマウント
+5. マーカー 2 つがあることを確認し、無ければ作る:
+   ```bash
+   ls -la /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok
+   # 無い場合のみ。HDD がマウントされていることを確かめてから作る
+   findmnt /mnt/photo >/dev/null && touch /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok
+   ```
+   (`/mnt/photo/` 直下は guest-gateway 用、`immich-library/` 直下は mount-guard 用。後者が無いと Immich は起動しない)
+6. scrub タイマーはマウント先のパスで決まるので、`/mnt/photo` のままなら設定し直し不要
+7. `docker compose up -d` → 動作確認後、旧 HDD は退役
+
+## イベント用の窓口(guest-gateway)
+
+イベント時だけ別の compose プロジェクト `wedding-gw` で動かす。当日の手順・監視・問い合わせ対応は
+[guest-gateway.md の「当日の運用」](guest-gateway.md#当日の運用)、デプロイは
+[guest-gateway/README.md](../guest-gateway/README.md) を参照。
+
+- 緊急停止: `docker compose -p wedding-gw down`(tailnet 内の Immich はそのまま使える)
+- ⚠️ ミニ PC 本体で `tailscale funnel reset` / `tailscale serve reset` は**使わない**
+  (Immich の tailnet 公開まで消える)
+- 起動順は Immich → 窓口(上の「compose 設定の反映」参照)
 
 ## ユーザー管理
 
@@ -82,6 +105,7 @@ docker system df          # Docker 側の肥大確認
 
 ```bash
 docker compose ps                              # 全サービス healthy?
+ls /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok   # HDD マウント済み?
 tailscale serve status                         # 443 → 2283 転送が生きてる?
 sudo btrfs scrub status /mnt/photo             # 直近 scrub でエラー 0?
 sudo smartctl -H /dev/sda                      # HDD の SMART 健康状態
@@ -98,7 +122,8 @@ HDD 交換のサイン。
 |---|---|
 | 友達「写真が上がらない」 | ①友達のスマホの Tailscale がオンか ②クォータ超過(管理→サーバー統計)③サーバー稼働(`docker compose ps`) |
 | ts.net URL で繋がらない | `tailscale status`、`tailscale serve status`。Machines 画面で key expiry が切れていないか |
-| mount-guard が起動を止める | `lsblk` で HDD 認識確認 → `sudo mount -a` → マーカーファイル存在確認 |
+| Immich が起動しない(`docker compose logs mount-guard` に `FATAL: photo drive not mounted`) | `lsblk` で HDD 認識確認 → `sudo mount -a` → `/mnt/photo/immich-library/.photosaver.mount-ok` の存在確認(mount-guard が見るのはこちら)→ `docker compose up -d` |
+| guest-gateway が起動しない・受付が止まる | `/mnt/photo/.photosaver.mount-ok` の存在確認(窓口が見るのはこちら)。詳細は [guest-gateway.md](guest-gateway.md#困ったとき) |
 | Web が 500/真っ白 | `docker compose logs -f immich-server`。DB unhealthy なら `docker compose logs database` |
 | ML/検索が重い・落ちる | ML はバッチ処理なので一時停止可: 管理 → ジョブ で Smart Search を一時停止 |
 | アプリ「サーバーが古い」 | 月次更新を実施(上記) |
@@ -109,8 +134,8 @@ HDD 交換のサイン。
 | 障害 | 影響 | 復旧 |
 |---|---|---|
 | HDD 故障 | **写真原本は喪失**(設計上許容済み) | 新 HDD で新規構築。NVMe 上の DB ダンプで「何があったか」は確認できる |
-| NVMe 故障 | DB 喪失、写真原本は無事 | OS 再構築 → HDD 上の `backups/` 最新ダンプでリストア([migration-runbook.md](migration-runbook.md) Phase 3 と同手順)→ サムネイル再生成 |
-| ミニ PC 故障 | ハード交換まで停止 | HDD を新機体に挿してセットアップ手順を再実行。データは HDD + ダンプで復元 |
+| NVMe 故障 | DB 喪失、写真原本は無事 | OS 再構築(セットアップ手順 6 は**フォーマットせず** fstab 追記とマウントだけ)→ HDD 上の `backups/` 最新ダンプでリストア([migration-runbook.md](migration-runbook.md) Phase 3 と同手順)→ サムネイル再生成 |
+| ミニ PC 故障 | ハード交換まで停止 | HDD を新機体に挿してセットアップ手順を再実行(手順 6 の `wipefs` / `mkfs` は**実行しない**。マーカー 2 つは HDD 上に残っている)。データは HDD + ダンプで復元 |
 | 誤操作で DB 破損 | メタデータ喪失リスク | 管理 → メンテナンス → 「バックアップから復元」(復元ポイント自動作成・失敗時ロールバック付き) |
 
 ## 旧環境(Windows 検証環境)について

@@ -1,8 +1,9 @@
-# scripts/
+# scripts/ — 旧 Windows 環境の補助スクリプト(凍結)
 
-Photosaver / HPSS プロジェクトの補助スクリプト群。Node.js 20 ESM で実装。
-
-## 実装済みスクリプト
+Phase A/B(Windows + Docker Desktop + album-guard)の検証環境向けに作った補助スクリプト群。
+Node.js 20 ESM で実装。**現行のミニ PC 構成(v2)では使わない**。v2 の手順は
+[docs/new-server-setup.md](../docs/new-server-setup.md)、ゲスト用アップロード窓口の
+スクリプトは [guest-gateway/scripts/](../guest-gateway/scripts/) を参照。
 
 | ファイル | 用途 |
 |---|---|
@@ -12,16 +13,10 @@ Photosaver / HPSS プロジェクトの補助スクリプト群。Node.js 20 ESM
 | `tailscale-verify.mjs` | Tailscale CLI 検出 + status + serve 設定 + album-guard 到達性の統合検証 |
 | `_env.mjs` | `.env` / `immich/.env` を読み込む内部ユーティリティ |
 
-## Phase B 以降で実装予定
-
-| ファイル | 用途 |
-|---|---|
-| `seed-albums.mjs` | 複数アルバムのパスワードを CSV から一括登録 |
-| `backup.mjs` | `PHOTO_STORAGE_PATH` を別ドライブに robocopy で差分バックアップ |
-
 ## 実行方法
 
-各スクリプトは Node.js 20 で直接実行:
+各スクリプトは Node.js 20 で直接実行(`generate-hash.mjs` は `album-guard/` の依存を使うため
+`cd album-guard && npm install` が前提):
 
 ```bash
 node scripts/check-drive.mjs
@@ -37,12 +32,3 @@ node scripts/tailscale-verify.mjs
 | 0 | 成功 |
 | 1 | 検証失敗 / ユーザー対処が必要 |
 | 2 | 環境不備(.env がない等) |
-
-## 作成時のルール
-
-- ES Modules (`.mjs`) を使用
-- 依存は `album-guard/package.json` のものを流用(`cd album-guard && npm install` が前提)
-- 破壊的操作(削除・上書き)は `--confirm` フラグ必須
-- パスワード等のシークレットを引数で受ける場合、`process.argv` ではなく `stdin` を推奨(shell history に残さない)
-- 外部 API 呼び出し(GitHub 等)は Node 20 built-in `fetch` を直接使う(追加 dep を避ける)
-- CLI 呼び出し(`tailscale`, `docker` 等)は `execSync` を使い、失敗時は明確なエラーと次アクションを表示する
