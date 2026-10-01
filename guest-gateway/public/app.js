@@ -68,6 +68,9 @@ function requireLogin() {
 // Some in-app browsers / VPN setups report offline while the network works and never fire
 // 'online'. Once an upload makes progress while navigator.onLine says false, stop trusting it.
 let onLineUnreliable = false;
+// Set when an upload failed while offline: the queue then waits for 'online' (or 再試行)
+// instead of failing item after item. Starting is never blocked on navigator.onLine alone.
+let offlinePause = false;
 
 /** navigator.onLine is only trustworthy when it says false (no network at all). */
 function isOffline() {
@@ -155,7 +158,9 @@ function updateSummary() {
     (adding ? `(アルバムに追加中 ${adding} 件)` : '') +
     (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '') +
     (rejected ? `(受付不可 ${rejected} 件)` : '') +
-    (waiting && isOffline() ? ' — 通信が切れています。電波が戻ると自動で再開します' : '');
+    (waiting && offlinePause && isOffline()
+      ? ' — 通信が切れています。電波が戻ると自動で再開します'
+      : '');
 }
 
 function showTab(name) {
@@ -350,8 +355,9 @@ function createUpload(item) {
       } else {
         item.status = 'error';
         if (status === 401) requireLogin();
-        // Offline: no timer, the 'online' event resumes the queue.
-        else if (!isOffline()) scheduleAutoRetry(item);
+        // Offline: no timer; pause the queue until 'online' (or 再試行) resumes it.
+        else if (isOffline()) offlinePause = true;
+        else scheduleAutoRetry(item);
         updateItem(item, failedText(item));
       }
       finish();
@@ -382,11 +388,12 @@ function finish() {
   next();
 }
 
-function next({ ignoreOffline = false } = {}) {
+function next() {
   if (active) return;
+  if (offlinePause && !isOffline()) offlinePause = false;
   // Paused rather than failing item after item: 'online' / a new login continue the queue.
   // The wake lock stays on while the guest waits with queued items.
-  if ((!ignoreOffline && isOffline()) || needsLogin) {
+  if (offlinePause || needsLogin) {
     updateSummary();
     return;
   }
@@ -434,7 +441,8 @@ function retry(item) {
   item.autoRetries = 0;
   requeue(item, '待機中');
   // The guest pressed 再試行: try even if navigator.onLine says offline (it can be wrong).
-  next({ ignoreOffline: true });
+  offlinePause = false;
+  next();
 }
 
 /** Something changed for the better (screen back, network back, logged in): retry all now. */
@@ -647,6 +655,7 @@ window.addEventListener('online', () => {
     return;
   }
   // Also starts the items that were left queued while offline.
+  offlinePause = false;
   requeueFailed('待機中(通信が戻ったので再開)');
   schedulePoll();
 });
