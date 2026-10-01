@@ -211,6 +211,22 @@ describe('open gateway', () => {
     expect(res.status).toBe(404);
   });
 
+  it('serves only the listed PhotoSwipe files from node_modules', async () => {
+    const lightbox = await fetch(`${srv.baseUrl}/vendor/photoswipe/photoswipe-lightbox.esm.min.js`);
+    expect(lightbox.status).toBe(200);
+    expect(lightbox.headers.get('content-type')).toMatch(/javascript/);
+    const css = await fetch(`${srv.baseUrl}/vendor/photoswipe/photoswipe.css`);
+    expect(css.headers.get('content-type')).toMatch(/css/);
+    for (const name of [
+      'package.json',
+      '..%2F..%2Fpackage.json',
+      'photoswipe.esm.js.map',
+      'toString',
+    ]) {
+      expect((await fetch(`${srv.baseUrl}/vendor/photoswipe/${name}`)).status).toBe(404);
+    }
+  });
+
   it('shows the client address for diagnostics', async () => {
     const { cookie } = await login(srv.baseUrl);
     const res = await fetch(`${srv.baseUrl}/api/whoami`, { headers: { Cookie: cookie } });

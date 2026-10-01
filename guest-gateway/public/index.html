@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow" />
     <title>写真アップロード</title>
+    <link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -30,24 +31,47 @@
 
       <section id="uploader" hidden>
         <p id="greeting" class="greeting"></p>
-        <p class="notice" role="status">
-          アップロード中は<strong>この画面を開いたまま</strong>にしてください。<br />
-          画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。
-        </p>
 
-        <label class="pick">
-          写真・動画を選ぶ
-          <input id="files" type="file" accept="image/*,video/*" multiple />
-        </label>
+        <nav id="tabs" class="tabs" hidden>
+          <button id="tab-upload" type="button" class="tab" aria-pressed="true">
+            アップロード
+          </button>
+          <button id="tab-gallery" type="button" class="tab" aria-pressed="false">
+            みんなの写真
+          </button>
+        </nav>
 
-        <p id="summary" class="summary"></p>
-        <ul id="queue" class="queue"></ul>
+        <div id="upload-pane">
+          <p class="notice" role="status">
+            アップロード中は<strong>この画面を開いたまま</strong>にしてください。<br />
+            画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。
+          </p>
 
-        <details class="diag">
-          <summary>計測情報</summary>
-          <p id="whoami">-</p>
-          <p id="closes-at">-</p>
-        </details>
+          <label class="pick">
+            写真・動画を選ぶ
+            <input id="files" type="file" accept="image/*,video/*" multiple />
+          </label>
+
+          <p id="summary" class="summary"></p>
+          <ul id="queue" class="queue"></ul>
+
+          <details class="diag">
+            <summary>計測情報</summary>
+            <p id="whoami">-</p>
+            <p id="closes-at">-</p>
+          </details>
+        </div>
+
+        <div id="gallery" hidden>
+          <div class="gallery-bar">
+            <span id="gallery-count"></span>
+            <span id="gallery-status" role="status"></span>
+            <button id="gallery-refresh" type="button" class="small">更新</button>
+          </div>
+          <p id="gallery-empty" class="muted" hidden>まだ写真がありません。</p>
+          <div id="grid" class="grid"></div>
+          <p id="viewer-note" class="viewer-note" role="status"></p>
+        </div>
       </section>
     </main>
 

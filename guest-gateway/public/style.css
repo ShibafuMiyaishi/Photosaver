@@ -62,7 +62,8 @@ input[type='text'] {
   color: var(--fg);
 }
 
-button,
+/* Scoped to the page: the PhotoSwipe viewer (appended to body) keeps its own button styles. */
+main button,
 .pick {
   display: block;
   width: 100%;
@@ -131,4 +132,126 @@ button,
 
 .greeting {
   font-weight: bold;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+main .tab {
+  flex: 1;
+  padding: 10px;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+
+main .tab[aria-pressed='true'] {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.gallery-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+main .small {
+  width: auto;
+  margin-left: auto;
+  padding: 6px 14px;
+  font-size: 0.9rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 3px;
+}
+
+main .tile {
+  position: relative;
+  padding: 0;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: var(--border);
+  border-radius: 0;
+  /* Thousands of tiles: skip layout/paint for the ones far off screen. */
+  content-visibility: auto;
+  contain-intrinsic-size: 96px;
+}
+
+.tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tile .badge,
+.tile .mine {
+  position: absolute;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  color: #fff;
+  background: rgb(0 0 0 / 55%);
+  border-radius: 4px;
+}
+
+.tile .badge {
+  right: 4px;
+  bottom: 4px;
+}
+
+.tile .mine {
+  top: 4px;
+  left: 4px;
+  background: var(--accent);
+}
+
+/* Viewer additions (inside PhotoSwipe) */
+.gw-caption {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  color: #fff;
+  font-size: 0.9rem;
+  background: linear-gradient(transparent, rgb(0 0 0 / 60%));
+  pointer-events: none;
+}
+
+.viewer-note:empty {
+  display: none;
+}
+
+.pswp__button.gw-save {
+  width: auto;
+  padding: 0 14px;
+  color: #fff;
+  font-size: 0.95rem;
+}
+
+.gw-video {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gw-video video {
+  width: 100%;
+  height: 100%;
+  background: #000;
 }

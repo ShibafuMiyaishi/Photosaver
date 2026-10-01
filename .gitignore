@@ -61,3 +61,5 @@ server/hwaccel.ml.yml
 data/photos/
 data/immich-library/
 /Photo/
+# Playwright MCP の出力(スクリーンショット等は tmp/e2e/ へ)
+.playwright-mcp/
