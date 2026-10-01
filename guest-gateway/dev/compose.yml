@@ -1,0 +1,56 @@
+# guest-gateway/dev/compose.yml
+# 開発用の Immich(Mac のローカル Docker 専用。本番には使わない)。
+# 本番と同じ v3.2.4 に固定し、機械学習コンテナは省く(アップロード・一覧・削除の確認には不要)。
+# 写真ライブラリはリポジトリ直下の tmp/dev-immich/ に置く(gitignore 対象)。
+# Postgres のデータは名前付き Docker ボリューム dev-pgdata にあり、tmp/ を消しても残る。
+#
+#   docker compose -f guest-gateway/dev/compose.yml up -d
+#   docker compose -f guest-gateway/dev/compose.yml down        # 停止(データは残る)
+#   docker compose -f guest-gateway/dev/compose.yml down -v     # 完全リセット(開発用のみ)
+#     ⚠️ -v は開発用 DB(ボリューム dev-pgdata)を削除する。ライブラリも消すなら tmp/dev-immich/ も削除
+#
+# 起動後の初期設定は guest-gateway/README.md の「開発用 Immich」を参照。
+
+name: guest-gateway-dev
+
+services:
+  immich-server:
+    container_name: gg_dev_immich_server
+    image: ghcr.io/immich-app/immich-server:v3.2.4
+    volumes:
+      - ../../tmp/dev-immich/library:/data
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      # Dev-only throwaway credential for a local, loopback-bound database.
+      DB_PASSWORD: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+      TZ: Asia/Tokyo
+    ports:
+      - '127.0.0.1:2283:2283'
+    depends_on:
+      - redis
+      - database
+    restart: unless-stopped
+
+  redis:
+    container_name: gg_dev_immich_redis
+    image: docker.io/valkey/valkey:9@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf
+    restart: unless-stopped
+
+  database:
+    container_name: gg_dev_immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - dev-pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    restart: unless-stopped
+
+volumes:
+  dev-pgdata:
