@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>写真アップロード</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>写真・動画アップロード</h1>
+
+      <section id="login" hidden>
+        <form id="login-form">
+          <label for="password">合言葉</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
+          <button type="submit">入る</button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+      </section>
+
+      <section id="uploader" hidden>
+        <p class="notice" role="status">
+          アップロード中は<strong>この画面を開いたまま</strong>にしてください。<br />
+          画面を閉じたり別のアプリに切り替えると一時停止し、戻ると続きから再開します。
+        </p>
+
+        <label class="pick">
+          写真・動画を選ぶ
+          <input id="files" type="file" accept="image/*,video/*" multiple />
+        </label>
+
+        <p id="summary" class="summary"></p>
+        <ul id="queue" class="queue"></ul>
+
+        <details class="diag">
+          <summary>計測情報</summary>
+          <p id="whoami">-</p>
+          <p id="closes-at">-</p>
+        </details>
+      </section>
+    </main>
+
+    <script src="/vendor/tus.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

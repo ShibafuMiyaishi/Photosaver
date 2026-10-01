@@ -1,0 +1,16 @@
+node_modules
+test
+coverage
+compose.yml
+ts-config
+eslint.config.js
+vitest.config.js
+.prettierrc
+.editorconfig
+.dockerignore
+.gitignore
+README.md
+Dockerfile
+*.log
+.env
+.env.*

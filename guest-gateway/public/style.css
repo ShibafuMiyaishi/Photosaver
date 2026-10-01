@@ -1,0 +1,129 @@
+/* guest-gateway/public/style.css */
+
+:root {
+  --bg: #fafaf7;
+  --fg: #1f2328;
+  --muted: #6b7075;
+  --accent: #2f6f5e;
+  --error: #b42318;
+  --card: #ffffff;
+  --border: #e3e3dc;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --fg: #e8e8e3;
+    --muted: #9aa0a6;
+    --accent: #7cc4ad;
+    --error: #ff8a80;
+    --card: #1f2226;
+    --border: #2e3237;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Hiragino Sans',
+    sans-serif;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+h1 {
+  font-size: 1.3rem;
+}
+
+input[type='password'] {
+  display: block;
+  width: 100%;
+  margin: 8px 0 12px;
+  padding: 12px;
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+}
+
+button,
+.pick {
+  display: block;
+  width: 100%;
+  padding: 14px;
+  font-size: 1rem;
+  text-align: center;
+  color: #fff;
+  background: var(--accent);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pick input {
+  display: none;
+}
+
+.notice {
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.error {
+  color: var(--error);
+}
+
+.summary {
+  color: var(--muted);
+}
+
+.queue {
+  list-style: none;
+  padding: 0;
+}
+
+.queue li {
+  margin: 8px 0;
+  padding: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.queue progress {
+  width: 100%;
+}
+
+.queue .meta {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.queue .retry {
+  margin-top: 6px;
+  padding: 8px;
+}
+
+.diag {
+  margin-top: 24px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
