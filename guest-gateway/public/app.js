@@ -154,6 +154,17 @@ function uploadIdOf(item) {
   }
 }
 
+// A new login gets a new device id, and the server only reports the caller's own uploads, so
+// items sent under the previous session can no longer be polled. The server still imports them.
+function settleOrphanedImports() {
+  for (const item of items) {
+    if (item.status !== 'importing') continue;
+    item.status = 'done';
+    updateItem(item, '送信完了 — アルバムへの追加はサーバー側で続いています');
+  }
+  updateSummary();
+}
+
 function schedulePoll() {
   if (pollTimer || !items.some((i) => i.status === 'importing' && i.uploadId)) return;
   pollTimer = setTimeout(pollImports, POLL_INTERVAL_MS);
@@ -391,6 +402,7 @@ async function submitLogin() {
     setGreeting(nickname);
     show('uploader');
     loadDiagnostics();
+    settleOrphanedImports();
     requeueFailed('待機中(再ログイン後に再開)');
   } else if (res.status === 429) {
     const { error } = await res.json().catch(() => ({}));
