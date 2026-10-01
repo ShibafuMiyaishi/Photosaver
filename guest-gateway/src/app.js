@@ -311,7 +311,8 @@ export function createApp(config, { store, importer, immich } = {}) {
       deleteEnabled: Boolean(config.immich.deleteApiKey),
       heavyIdleMs: config.mediaIdleMs,
     });
-    app.use(['/api/assets', '/media'], requireSession);
+    // /download/* checks the session itself: it is opened by navigation and answers with pages.
+    app.use(['/api/assets', '/api/download', '/media'], requireSession);
     app.use(gallery);
   }
 

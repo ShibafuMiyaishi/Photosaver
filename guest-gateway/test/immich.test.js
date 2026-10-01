@@ -322,4 +322,53 @@ describe('createImmichClient', () => {
     const bodies = fake.requests.map((r) => JSON.parse(r.body).orderBy.direction);
     expect(bodies).toEqual(['asc', 'desc']);
   });
+  it('plans ZIP archives through the share link and keeps only valid ids', async () => {
+    fake = await startFake((_req, res) =>
+      json(res, 201, {
+        totalSize: 999,
+        archives: [
+          { size: 10, assetIds: [ASSET, '../etc/passwd'] },
+          { size: 5, assetIds: ['nope'] },
+        ],
+      }),
+    );
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'share-key' });
+    const info = await client.downloadInfo({ albumId: ALBUM, archiveSize: 2048 });
+    // Parts that end up empty are dropped; the total is recomputed from what is kept.
+    expect(info).toEqual({ totalSize: 10, archives: [{ size: 10, assetIds: [ASSET] }] });
+    const [req] = fake.requests;
+    expect([req.method, req.url, req.headers['x-immich-share-key']]).toEqual([
+      'POST',
+      '/api/download/info',
+      'share-key',
+    ]);
+    expect(JSON.parse(req.body)).toEqual({ albumId: ALBUM, archiveSize: 2048 });
+    await expect(client.downloadInfo({ albumId: 'x', archiveSize: 1 })).rejects.toBeInstanceOf(
+      ImmichError,
+    );
+  });
+
+  it('opens a ZIP stream uncompressed and maps rejections without the body', async () => {
+    fake = await startFake((req, res) => {
+      if (JSON.parse(req.body).assetIds.length > 1) return json(res, 400, { message: 'internal' });
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      return res.end('PK');
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'share-key' });
+    const res = await client.downloadArchive({ assetIds: [ASSET] });
+    expect(await res.text()).toBe('PK');
+    const [req] = fake.requests;
+    expect([req.method, req.url]).toEqual(['POST', '/api/download/archive']);
+    expect(req.headers['accept-encoding']).toBe('identity');
+    expect(req.headers['x-immich-share-key']).toBe('share-key');
+    expect(JSON.parse(req.body)).toEqual({ assetIds: [ASSET] });
+
+    const err = await client.downloadArchive({ assetIds: [ASSET, ALBUM] }).catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBe(400);
+    expect(err.message).not.toContain('internal');
+    for (const assetIds of [[], ['nope'], undefined]) {
+      await expect(client.downloadArchive({ assetIds })).rejects.toBeInstanceOf(ImmichError);
+    }
+  });
 });

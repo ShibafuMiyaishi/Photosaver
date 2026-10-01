@@ -197,6 +197,14 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    Upload the same photo again → 「同じ写真が既にアルバムにあります」.
    Open 「みんなの写真」: view, play the video, save a photo (share sheet → Photos), delete the test
    photo (own upload); with the organiser password, delete the test video.
+   **Bulk save** (「まとめて保存」; needs ~40 items incl. 2–3 videos in the album, one ≥ 600 MB if possible):
+   - iPhone (Safari): 「準備する」 → 「写真アプリに保存」 → share sheet shows 「〇項目を保存」 → items appear
+     in Photos (videos too); the second batch follows; a video > 500 MB is offered via 「ファイル」.
+     Note whether Safari reloads/crashes while preparing (memory) — report the batch size used.
+   - iPhone save of a single video from the viewer → Photos.
+   - Android (Chrome): 「ダウンロードを始める」 → allow multiple downloads → files show in the gallery /
+     Google Photos 「Download」 folder.
+   - PC: 「ZIP を作成」 → download → the ZIP opens and holds the album.
 6. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

@@ -37,6 +37,8 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
   let event;
   let client;
   const files = {};
+  // Set by the delete test, used by the ZIP test.
+  let trashedId = null;
 
   beforeAll(async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
@@ -118,7 +120,7 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
     try {
       // A third distinct PNG: 2x1 pixels, so its checksum differs from A and B.
       const png = Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR42mP8z8DAwMDAwAAAD/4BAJiuVAoAAAAASUVORK5CYII=',
+        'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGNgaPj//38Dw38AFPkE/bhh2J8AAAAASUVORK5CYII=',
         'base64',
       );
       await fs.writeFile(path.join(dir, 'up1'), png);
@@ -175,6 +177,24 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
     expect(gone).toBe(true);
     // Trashed assets are no longer readable through the share link.
     expect(await client.isAssetVisible(victim.id)).toBe(false);
+    trashedId = victim.id;
+  });
+
+  it('plans and streams ZIP archives of the album; a trashed id fails the whole ZIP', async () => {
+    const listed = (await client.listAlbumAssets({ albumId: event.albumId })).items.map(
+      (a) => a.id,
+    );
+    const info = await client.downloadInfo({ albumId: event.albumId, archiveSize: 1024 ** 3 });
+    // The plan leaves trashed assets out, like the listing.
+    expect(info.archives.flatMap((a) => a.assetIds).sort()).toEqual([...listed].sort());
+    const zip = await client.downloadArchive({ assetIds: info.archives[0].assetIds });
+    expect(zip.headers.get('content-encoding')).toBeNull();
+    const bytes = Buffer.from(await zip.arrayBuffer());
+    expect(bytes.subarray(0, 4).toString('hex')).toBe('504b0304');
+    expect(trashedId).not.toBeNull();
+    const err = await client.downloadArchive({ assetIds: [listed[0], trashedId] }).catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBe(400);
   });
 
   it('rejects a wrong share key', async () => {

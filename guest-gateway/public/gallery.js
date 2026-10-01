@@ -1,12 +1,23 @@
 // guest-gateway/public/gallery.js
 // 「みんなの写真」: アルバム全体のサムネイル一覧 → PhotoSwipe で拡大・スワイプ・動画再生 → 保存。
-// 保存は写真なら原寸を取得してから共有シート(写真アプリへ保存)、動画や非対応端末は直接ダウンロード。
-// 原寸の先読みはしない(ゲスト全員が見るだけで数 GB になるため)。1 回目のタップで準備、2 回目で保存。
+// 保存は端末に合わせる(bulk.js): iPhone / iPad は原寸を取得してから共有シートで写真アプリへ
+// (1 回目のタップで準備、2 回目で保存。大きな動画は「ファイル」へ)、Android と PC は直接ダウンロード。
+// 原寸の先読みはしない(ゲスト全員が見るだけで数 GB になるため)。「まとめて保存」も bulk.js。
 // サムネイルは画面に近いものから同時 12 件までに絞って読み込む(窓口の同時配信上限 48 より十分下)。
 // 動画は表示中のスライドだけが通信する(窓口の動画・原寸の上限は端末あたり 4 本)。
 // 削除は自分の投稿(管理者モードなら全件)だけ、2 回タップで確定。Immich のゴミ箱へ移る。
 
 import PhotoSwipeLightbox from '/vendor/photoswipe/photoswipe-lightbox.esm.min.js';
+import {
+  BulkError,
+  downloadDirectly,
+  fetchOriginal,
+  fileFor,
+  initBulk,
+  markSaved,
+  saveMode,
+  SHARE_MAX_FILE_BYTES,
+} from './bulk.js';
 
 // Thumbnails in flight at once; well below the gateway's 48 per device, so 429s are rare and
 // failures are mostly "not generated yet" (404 right after an upload).
@@ -31,8 +42,11 @@ let onUnauthorized = () => {};
 let apiFetch = null;
 // { role, canDelete } from the session.
 let permissions = { role: 'guest', canDelete: false };
-// Prepared original for the share sheet: assetId → File (only the photo being saved).
+// Prepared original for the share sheet: assetId → File, or 'download' for a video too large
+// for it (only the item being saved). The next tap uses it while it still counts as a gesture.
 const prepared = new Map();
+const mode = saveMode();
+let bulk = null;
 
 function mediaUrl(asset, kind) {
   return `/media/${encodeURIComponent(asset.id)}/${kind}`;
@@ -48,17 +62,6 @@ function formatDate(iso) {
 function formatDuration(ms) {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
-
-function canShareFiles() {
-  try {
-    return (
-      typeof navigator.canShare === 'function' &&
-      navigator.canShare({ files: [new File([''], 'x.jpg', { type: 'image/jpeg' })] })
-    );
-  } catch {
-    return false;
-  }
 }
 
 // --- Thumbnails (client-side queue) ---
@@ -213,21 +216,14 @@ function captionText(asset) {
 }
 
 function saveLabel(asset) {
-  if (asset.type === 'video' || !canShareFiles()) return '保存';
-  return prepared.has(asset.id) ? '写真に保存' : '保存';
+  if (mode !== 'share') return '保存';
+  const ready = prepared.get(asset.id);
+  if (ready === 'download') return 'ファイルに保存';
+  return ready ? '写真に保存' : '保存';
 }
 
 function currentAsset() {
   return lightbox?.pswp?.currSlide?.data.asset ?? null;
-}
-
-function downloadDirectly(asset) {
-  const link = document.createElement('a');
-  link.href = `${mediaUrl(asset, 'original')}?download=1`;
-  link.download = asset.filename ?? '';
-  document.body.append(link);
-  link.click();
-  link.remove();
 }
 
 /** Show the note only while the guest is still on the photo it is about. */
@@ -236,19 +232,32 @@ function noteFor(asset, text) {
 }
 
 async function onSave(button, asset) {
-  if (asset.type === 'video' || !canShareFiles()) {
+  if (mode !== 'share') {
+    // Android: Downloads (shown in the gallery). PCs: the browser's download folder.
     downloadDirectly(asset);
+    markSaved([asset.id]);
     noteFor(
       asset,
-      asset.type === 'video' ? '動画はダウンロードされます(iPhone は「ファイル」アプリ)' : '',
+      mode === 'download' ? '「ダウンロード」に保存します(ギャラリーにも表示されます)' : '',
     );
     return;
   }
-  const file = prepared.get(asset.id);
-  if (file) {
+  const ready = prepared.get(asset.id);
+  if (ready === 'download') {
+    downloadDirectly(asset);
+    markSaved([asset.id]);
+    prepared.clear();
+    noteFor(
+      asset,
+      '「ファイル」アプリで開き、共有ボタンから「ビデオを保存」で写真アプリに入ります',
+    );
+    return;
+  }
+  if (ready) {
     try {
-      await navigator.share({ files: [file] });
+      await navigator.share({ files: [ready] });
       prepared.clear();
+      markSaved([asset.id]);
     } catch (err) {
       // AbortError = the guest closed the share sheet (keep the file for another try);
       // anything else → plain download.
@@ -260,13 +269,23 @@ async function onSave(button, asset) {
   button.disabled = true;
   button.textContent = '準備中…';
   try {
-    const res = await fetch(mediaUrl(asset, 'original'), { credentials: 'same-origin' });
-    if (!res.ok) throw new Error(String(res.status));
-    const blob = await res.blob();
+    const result = await fetchOriginal(asset, { maxBytes: SHARE_MAX_FILE_BYTES });
     prepared.clear();
-    prepared.set(asset.id, new File([blob], asset.filename || 'photo.jpg', { type: blob.type }));
-    noteFor(asset, 'もう一度タップすると写真アプリに保存できます');
-  } catch {
+    if (result.missing) {
+      noteFor(asset, 'この写真は削除されています');
+    } else if (result.tooLarge) {
+      prepared.set(asset.id, 'download');
+      noteFor(asset, '大きな動画のため、もう一度タップすると「ファイル」アプリに保存されます');
+    } else {
+      prepared.set(asset.id, fileFor(asset, result.blob));
+      noteFor(asset, 'もう一度タップすると写真アプリに保存できます');
+    }
+  } catch (err) {
+    if (err instanceof BulkError && err.message === 'unauthorized') {
+      lightbox.pswp?.close();
+      onUnauthorized();
+      return;
+    }
     noteFor(asset, '取得できませんでした。もう一度お試しください');
   } finally {
     // The guest may have swiped meanwhile: label the button for the photo shown now.
@@ -321,6 +340,7 @@ async function onDelete(button, asset) {
     deletedIds.add(asset.id);
     lightbox.pswp?.close();
     renderGrid(assets);
+    bulk?.refresh();
     $('gallery-status').textContent = '削除しました';
   } catch (err) {
     if (err?.message !== 'closed') noteFor(asset, '削除できませんでした。もう一度お試しください');
@@ -498,6 +518,7 @@ async function refresh(api, { force = false } = {}) {
       for (const asset of list) asset.aspect = previous.get(asset.id)?.aspect;
       loadedAt = Date.now();
       renderGrid(list);
+      bulk?.refresh();
       $('gallery-status').textContent = '';
     } catch (err) {
       if (err?.message !== 'closed') {
@@ -519,7 +540,9 @@ export function initGallery(api, hooks) {
   onUnauthorized = hooks.onUnauthorized;
   apiFetch = api;
   if (!lightbox) setupLightbox();
+  bulk ??= initBulk({ api, getAssets: () => assets, onUnauthorized: () => onUnauthorized() });
   $('gallery-refresh').onclick = () => refresh(api, { force: true });
+  $('gallery-bulk').onclick = () => bulk.toggle();
   return {
     show: () => refresh(api),
     /** @param {{ role: string, canDelete: boolean }} next from /api/session or after login */

@@ -4,7 +4,10 @@
 // 一覧は全件をまとめて返す: Immich のページ送りは件数オフセット方式で、撮影日時(秒単位)が同じ写真の
 // 並びが問い合わせごとに変わるため、ページの境目で重複・欠落が起きる。窓口で全ページを集約して重複を
 // 除き、アルバムの件数に届かなければ並び順を変えて取り直して補い、安定ソートして短時間キャッシュする。
+// PC 向けの ZIP 一括ダウンロード: Immich に約 2 GB ごとの分割を計画させて窓口が保持し、各 ZIP は
+// ダウンロードの時点でアルバムにある写真だけに絞って Immich の ZIP 生成を中継する。
 
+import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
@@ -41,6 +44,31 @@ const HEAVY_STREAMS_TOTAL = 32;
 // A heavy stream that moves no bytes for this long (paused <video>, stalled or idle reader) is
 // closed so it cannot hold a slot forever; players re-request with Range when resumed.
 const HEAVY_IDLE_MS = 60_000;
+// ZIP parts: a ZIP is built on the fly and cannot be resumed, so parts stay moderate.
+const ZIP_PART_BYTES = 2 * 1024 ** 3;
+// A ZIP reads originals from the HDD for minutes; keep them few (beyond → busy page).
+const ZIP_PER_DEVICE = 2;
+const ZIP_STREAMS_TOTAL = 4;
+// One plan per device (a new one replaces it); old plans expire.
+const ZIP_PLAN_TTL_MS = 24 * 60 * 60_000;
+const MAX_ZIP_PLANS = 500;
+const PLAN_ID = /^[0-9a-f]{32}$/;
+const PART_NUMBER = /^[1-9][0-9]{0,3}$/;
+
+/** Minimal page for ZIP links: they are opened by navigation, so errors must be readable. */
+function sendPage(res, status, message) {
+  const escaped = message.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  res
+    .status(status)
+    .set('Cache-Control', 'no-store')
+    .type('html')
+    .send(
+      `<!doctype html><html lang="ja"><head><meta charset="utf-8">` +
+        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<meta name="robots" content="noindex"><title>ダウンロード</title></head>` +
+        `<body><p>${escaped}</p><p><a href="/">写真の一覧に戻る</a></p></body></html>`,
+    );
+}
 
 /** The only asset fields a guest needs (Immich also returns owner ids, internal paths, ...). */
 function toGuestAsset(asset, uploader, deviceId) {
@@ -93,6 +121,11 @@ export function createGalleryRouter({
   // deviceId → { light, heavy } responses in flight.
   const mediaInFlight = new Map();
   let heavyInFlight = 0;
+  // planId → { deviceId, createdAt, parts: string[][] }; Map order = creation order.
+  const zipPlans = new Map();
+  // deviceId → ZIP streams in flight.
+  const zipInFlight = new Map();
+  let zipStreams = 0;
 
   async function listPass(byId, direction) {
     let cursor = null;
@@ -298,6 +331,165 @@ export function createGalleryRouter({
       await piping;
     } catch (err) {
       if (upstreamFailed) log('warn', 'media_stream_interrupted', { kind, error: err.message });
+    }
+    return undefined;
+  });
+
+  function dropExpiredPlans() {
+    for (const [id, plan] of zipPlans) {
+      if (now() - plan.createdAt < ZIP_PLAN_TTL_MS && zipPlans.size <= MAX_ZIP_PLANS) break;
+      zipPlans.delete(id);
+    }
+  }
+
+  // Plan the ZIP parts for this guest (PCs; phones save into the photo app instead).
+  router.post('/api/download', async (req, res) => {
+    const { deviceId } = req.gwSession;
+    let info;
+    try {
+      info = await immich.downloadInfo({ albumId, archiveSize: ZIP_PART_BYTES });
+    } catch (err) {
+      log('error', 'zip_plan_failed', { status: err.status ?? 0, error: err.message });
+      return res.status(502).json({ error: 'unavailable' });
+    }
+    for (const [id, plan] of zipPlans) if (plan.deviceId === deviceId) zipPlans.delete(id);
+    const id = crypto.randomBytes(16).toString('hex');
+    zipPlans.set(id, {
+      deviceId,
+      createdAt: now(),
+      parts: info.archives.map((archive) => archive.assetIds),
+    });
+    dropExpiredPlans();
+    log('info', 'zip_planned', {
+      device: req.gwSession.deviceShort,
+      parts: info.archives.length,
+      bytes: info.totalSize,
+    });
+    return res.json({
+      id,
+      totalSize: info.totalSize,
+      parts: info.archives.map((archive) => ({
+        size: archive.size,
+        count: archive.assetIds.length,
+      })),
+    });
+  });
+
+  router.get('/download/:plan/:part', async (req, res, next) => {
+    const { plan: planId, part } = req.params;
+    if (!PLAN_ID.test(planId) || !PART_NUMBER.test(part)) return next();
+    const session = req.gwSession;
+    if (!session)
+      return sendPage(
+        res,
+        401,
+        'ログインの有効期限が切れました。一覧に戻ってログインし直してください。',
+      );
+    const plan = zipPlans.get(planId);
+    const index = Number(part) - 1;
+    if (
+      !plan ||
+      plan.deviceId !== session.deviceId ||
+      now() - plan.createdAt >= ZIP_PLAN_TTL_MS ||
+      index >= plan.parts.length
+    ) {
+      return sendPage(
+        res,
+        404,
+        'このダウンロードの期限が切れました。一覧に戻って、もう一度「ZIP を作成」してください。',
+      );
+    }
+    const total = plan.parts.length;
+    const filename = total === 1 ? 'photos.zip' : `photos-${index + 1}-of-${total}.zip`;
+    // A HEAD (link checkers, some download managers) must not make Immich build a whole ZIP.
+    if (req.method === 'HEAD') {
+      res.set({ 'Content-Type': 'application/zip', 'Cache-Control': 'private, no-store' });
+      return res.end();
+    }
+    const { deviceId } = session;
+    const mine = zipInFlight.get(deviceId) ?? 0;
+    if (mine >= ZIP_PER_DEVICE || zipStreams >= ZIP_STREAMS_TOTAL) {
+      return sendPage(
+        res,
+        429,
+        'ダウンロードが混み合っています。今のダウンロードが終わってから、もう一度お試しください。',
+      );
+    }
+
+    // Only what is in the album right now: one trashed id makes Immich reject the whole ZIP.
+    let album;
+    try {
+      album = await loadAlbum();
+    } catch (err) {
+      log('error', 'gallery_list_failed', { error: err.message });
+      return sendPage(
+        res,
+        502,
+        '写真を準備できませんでした。しばらくしてから、もう一度お試しください。',
+      );
+    }
+    const present = new Set();
+    for (const asset of album.assets) {
+      present.add(asset.id);
+      if (isUuid(asset.livePhotoVideoId)) present.add(asset.livePhotoVideoId);
+    }
+    const assetIds = plan.parts[index].filter((id) => present.has(id));
+    if (assetIds.length === 0) {
+      return sendPage(res, 404, 'この ZIP の写真はすべて削除されています。');
+    }
+
+    zipInFlight.set(deviceId, mine + 1);
+    zipStreams += 1;
+    const controller = new AbortController();
+    res.once('close', () => {
+      controller.abort();
+      const left = (zipInFlight.get(deviceId) ?? 1) - 1;
+      if (left > 0) zipInFlight.set(deviceId, left);
+      else zipInFlight.delete(deviceId);
+      zipStreams -= 1;
+    });
+
+    let upstream;
+    try {
+      upstream = await immich.downloadArchive({ assetIds, signal: controller.signal });
+    } catch (err) {
+      if (controller.signal.aborted) return undefined;
+      log('error', 'zip_relay_failed', { status: err.status ?? 0, error: err.message });
+      return sendPage(
+        res,
+        502,
+        'ZIP を作成できませんでした。一覧に戻って、もう一度「ZIP を作成」してください。',
+      );
+    }
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'private, no-store',
+    });
+    if (!upstream.body) {
+      res.end();
+      return undefined;
+    }
+    log('info', 'zip_started', {
+      device: session.deviceShort,
+      part: index + 1,
+      assets: assetIds.length,
+    });
+    const body = Readable.fromWeb(upstream.body);
+    let upstreamFailed = false;
+    body.once('error', () => {
+      upstreamFailed = !controller.signal.aborted;
+    });
+    const piping = pipeline(body, res);
+    // Same idle rule as other heavy streams: a reader that stopped reading frees its slot.
+    const idle = setTimeout(() => res.destroy(), heavyIdleMs);
+    idle.unref();
+    body.on('data', () => idle.refresh());
+    res.once('close', () => clearTimeout(idle));
+    try {
+      await piping;
+    } catch (err) {
+      if (upstreamFailed) log('warn', 'zip_stream_interrupted', { error: err.message });
     }
     return undefined;
   });

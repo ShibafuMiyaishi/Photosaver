@@ -62,6 +62,11 @@ input[type='text'] {
   color: var(--fg);
 }
 
+/* `hidden` must win over the display rules below (buttons, links in the panels). */
+main [hidden] {
+  display: none !important;
+}
+
 /* Scoped to the page: the PhotoSwipe viewer (appended to body) keeps its own button styles. */
 main button,
 .pick {
@@ -168,6 +173,89 @@ main .small {
   margin-left: auto;
   padding: 6px 14px;
   font-size: 0.9rem;
+}
+
+.gallery-bar .small + .small {
+  margin-left: 0;
+}
+
+.bulk {
+  margin-bottom: 12px;
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.bulk h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
+.bulk .check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bulk .check input {
+  width: auto;
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bulk-actions #bulk-start {
+  flex: 1;
+}
+
+main .bulk-actions .small {
+  margin-left: 0;
+}
+
+.bulk-status {
+  min-height: 1.4em;
+}
+
+.bulk-list {
+  padding-left: 0;
+  list-style: none;
+}
+
+.bulk-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--border);
+}
+
+.bulk-list li.started .zip-link::after {
+  content: ' ✓';
+}
+
+.zip-link {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+main button.link {
+  display: inline;
+  width: auto;
+  padding: 0;
+  margin-right: 12px;
+  font-size: 0.85rem;
+  color: var(--accent);
+  text-decoration: underline;
+  background: none;
+}
+
+.bulk-foot {
+  margin-bottom: 0;
 }
 
 .muted {

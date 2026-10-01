@@ -20,7 +20,9 @@ Immich itself stays tailnet-only. Do not extend album-guard for this; it is a ne
 - Delete: guest = only assets uploaded from their own device (deviceId in session);
   admin mode (separate admin password) = can delete anything.
 - Deadline: after it, everything is closed (login, upload, view, download).
-- Out of scope for the first event: venue slideshow, uploader filter. ZIP download only if time allows.
+- Out of scope for the first event: venue slideshow, uploader filter.
+- Bulk save (user, 2026-10-01): phones must save into the default **Photos app** (not a ZIP);
+  PCs get ZIP files.
 - Stack: Node 24 LTS (`node:24-alpine`), ESM, Express 5, `node:sqlite`,
   `@tus/server` + `@tus/file-store`, `helmet`, `express-rate-limit`, `file-type`;
   browser: `tus-js-client`, `photoswipe` (served from node_modules, no CDN);
@@ -97,8 +99,12 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   thumbnail job has run. Assets outside the shared-link album → 400.
 - Video: `GET /api/assets/{id}/video/playback` (forward `Range` → 206; client needs `<video playsinline>`).
 - Original: `GET /api/assets/{id}/original` (`Range` → 206; `Content-Disposition: inline; filename*=UTF-8''…`).
-- ZIP: `POST /api/download/info` `{albumId, archiveSize}` → for each archive
-  `POST /api/download/archive` `{assetIds}` (streamed zip).
+- ZIP (verified v3.2.4, share key works with `allowDownload`): `POST /api/download/info`
+  `{albumId, archiveSize}` → `{totalSize, archives:[{size, assetIds}]}` (trashed assets left out,
+  live-photo motion parts added; a part is closed once it exceeds `archiveSize`) → per part
+  `POST /api/download/archive` `{assetIds}` → store-only zip stream (no Content-Length). **If any id
+  is not readable through the link (e.g. trashed after planning) the whole request is 400.** Immich
+  gzips the zip unless the request says `accept-encoding: identity` (the client always does).
 - Delete: `DELETE /api/assets` `{ids:[...]}` with `x-api-key` (no `force` → goes to trash).
 - Immich must be **>= v3.2.4** (GHSA-q89f-h332-8q2h: SVG upload → ImageMagick RCE, reachable via
   shared-link upload).
@@ -149,6 +155,13 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   for album assets and 400 for trashed ones (verified): the importer uses it to record `trashed`
   (UI explains) or, if the organiser restored it, a normal `duplicate` + clears `deleted_at`.
   The share key cannot restore from trash — the organiser restores in Immich.
+- ZIP (PCs): `POST /api/download` (session + CSRF header) asks Immich for a plan with ~2 GiB parts,
+  keeps it in memory (one per device, 24 h, max 500) and returns `{id, totalSize, parts:[{size,count}]}`.
+  `GET /download/:planId/:n` is opened by navigation, so it checks the session itself and answers
+  errors as small HTML pages; it serves only the caller's plan, filters the part to what the album
+  listing holds right now (plus listed assets' `livePhotoVideoId`) so a trashed asset cannot fail
+  the whole ZIP, allows 2 ZIPs per device / 4 in total (429 page), uses the heavy idle timeout,
+  answers HEAD without asking Immich, and names files `photos.zip` / `photos-<n>-of-<total>.zip`.
 
 ## Client-side gotchas (iOS especially)
 
@@ -158,4 +171,12 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   long `retryDelays`, fingerprint = name+size+deviceId, `removeFingerprintOnSuccess: true`.
 - Large downloads: direct navigation (`<a href>`), never fetch→blob (Safari WebKitBlobResource error).
   Photo save to Photos app: `navigator.share({files})`, file pre-fetched before the tap.
+- Saving is per platform (`public/bulk.js` `saveMode()`): iPhone/iPad (UA, iPadOS via touch) with
+  file sharing → share sheet into Photos, photos AND videos up to 500 MB each (larger → direct
+  download into Files, on a later tap so it is still a gesture); bulk = batches of ≤ 30 files /
+  ~300 MB, one share sheet per tap. Android → downloads (the share sheet has no "save to gallery"):
+  single = direct navigation, bulk = sequential fetch → blob → `<a download>`. PCs → ZIP (single =
+  direct download). iOS without file sharing (some in-app browsers) → "open in Safari" + ZIP only.
+  Saved ids live in `localStorage` (`gw-saved-v1`, best effort); own uploads excluded by default.
+  Batch/size limits are unverified on real devices — tune after the T4 check.
 - Guide text: "keep the screen open", "if many, 10 at a time", "Options → Format → Current" (immich#20636).
