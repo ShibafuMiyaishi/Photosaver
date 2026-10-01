@@ -57,4 +57,13 @@ describe('upload store', () => {
     ]);
     expect(store.listForDevice('dev-3')).toEqual([]);
   });
+
+  it('returns the status of requested ids, only for the caller device', () => {
+    store.add(ROW);
+    store.add({ ...ROW, uploadId: 'other', deviceId: 'dev-2' });
+    expect(store.statusForDevice('dev-1', ['abc123', 'other', 'missing'])).toEqual([
+      { id: 'abc123', filename: 'IMG_0001.HEIC', status: 'pending' },
+    ]);
+    expect(store.statusForDevice('dev-1', [])).toEqual([]);
+  });
 });

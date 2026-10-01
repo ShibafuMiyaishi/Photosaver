@@ -29,6 +29,9 @@ export const CSRF_VALUE = 'guest-gateway';
 
 const TUS_ROUTE = /^\/files(?:\/[A-Za-z0-9_-]+)?\/?$/;
 const TUS_METHODS = new Set(['POST', 'PATCH', 'HEAD']);
+const UPLOAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
+// Per status request; the client polls in batches of this size.
+export const MAX_STATUS_IDS = 100;
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // A login body is tiny; a client that has not sent it by then is stalling on purpose.
 const LOGIN_BODY_TIMEOUT_MS = 10_000;
@@ -257,9 +260,18 @@ export function createApp(config, { store, importer } = {}) {
   });
 
   // Import status of the caller's own uploads (the client polls this after each upload).
+  // `?ids=a,b,c` asks for the uploads the client is still waiting on (any age); without it the
+  // newest uploads are listed.
   app.get('/api/uploads', requireSession, (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json({ uploads: importing ? store.listForDevice(req.gwSession.deviceId) : [] });
+    if (!importing) return res.json({ uploads: [] });
+    const { deviceId } = req.gwSession;
+    if (req.query.ids === undefined) return res.json({ uploads: store.listForDevice(deviceId) });
+    const ids = typeof req.query.ids === 'string' ? req.query.ids.split(',') : [];
+    if (ids.length === 0 || ids.length > MAX_STATUS_IDS || !ids.every((id) => UPLOAD_ID.test(id))) {
+      return res.status(400).json({ error: 'bad_request' });
+    }
+    return res.json({ uploads: store.statusForDevice(deviceId, ids) });
   });
 
   app.all(TUS_ROUTE, requireSession, (req, res, next) => {

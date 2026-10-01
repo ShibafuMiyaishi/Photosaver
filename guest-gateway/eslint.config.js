@@ -27,6 +27,7 @@ const browserGlobals = {
   clearTimeout: 'readonly',
   URL: 'readonly',
   localStorage: 'readonly',
+  encodeURIComponent: 'readonly',
 };
 
 const vitestGlobals = {

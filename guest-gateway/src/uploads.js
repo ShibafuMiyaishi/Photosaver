@@ -230,17 +230,23 @@ export function createTusServer(config, { onReceived } = {}) {
       log('info', 'upload_finished', metrics);
       if (onReceived) {
         // Errors here surface as a 500 (guardHook) so the guest sees the upload as failed.
-        await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
-        onReceived({
-          uploadId: upload.id,
-          deviceId: upload.metadata?.deviceId ?? '',
-          nickname: upload.metadata?.nickname ?? '',
-          // Sanitized and extension-checked in onUploadCreate.
-          filename: upload.metadata?.filename ?? '',
-          mime,
-          size: upload.size,
-          lastModified: parseLastModified(upload.metadata?.lastModified),
-        });
+        const importPath = await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
+        try {
+          onReceived({
+            uploadId: upload.id,
+            deviceId: upload.metadata?.deviceId ?? '',
+            nickname: upload.metadata?.nickname ?? '',
+            // Sanitized and extension-checked in onUploadCreate.
+            filename: upload.metadata?.filename ?? '',
+            mime,
+            size: upload.size,
+            lastModified: parseLastModified(upload.metadata?.lastModified),
+          });
+        } catch (err) {
+          // Not recorded = never imported and never resumed: do not leave an orphan behind.
+          await fs.rm(importPath, { force: true });
+          throw err;
+        }
       } else if (config.keepUploads) {
         try {
           const ext = extensionOf(upload.metadata?.filename ?? '') || 'bin';

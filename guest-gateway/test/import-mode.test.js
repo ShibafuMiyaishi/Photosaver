@@ -126,6 +126,26 @@ describe('import mode', () => {
     expect(await fs.readdir(path.join(srv.stagingDir, IMPORT_DIR_NAME))).toEqual([]);
   });
 
+  it('answers status queries by id, only for the caller, and validates the ids', async () => {
+    const mine = await login(srv.baseUrl);
+    const other = await login(srv.baseUrl, undefined, 'はなこ');
+    const a = await tusUpload(srv.baseUrl, mine.cookie, PNG, 'IMG_A.png');
+    const b = await tusUpload(srv.baseUrl, other.cookie, PNG, 'IMG_B.png');
+    const query = async (cookie, qs) => {
+      const res = await fetch(`${srv.baseUrl}/api/uploads?${qs}`, { headers: { Cookie: cookie } });
+      return { status: res.status, body: await res.json() };
+    };
+
+    expect(await query(mine.cookie, `ids=${a.id},${b.id}`)).toEqual({
+      status: 200,
+      body: { uploads: [{ id: a.id, filename: 'IMG_A.png', status: 'pending' }] },
+    });
+    const tooMany = Array.from({ length: 101 }, (_, i) => `id${i}`).join(',');
+    for (const qs of ['ids=', 'ids=../x', `ids=${tooMany}`, 'ids=a&ids=b']) {
+      expect((await query(mine.cookie, qs)).status).toBe(400);
+    }
+  });
+
   it('keeps files waiting for Immich when staging is purged at the deadline', async () => {
     const { cookie } = await login(srv.baseUrl);
     const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0002.png');
@@ -135,5 +155,27 @@ describe('import mode', () => {
     await purgeStaging(srv.stagingDir, { keep: [IMPORT_DIR_NAME] });
     expect(await fs.readdir(srv.stagingDir)).toEqual([IMPORT_DIR_NAME]);
     expect(await fs.readdir(path.join(srv.stagingDir, IMPORT_DIR_NAME))).toEqual([result.id]);
+  });
+});
+
+describe('import mode when recording fails', () => {
+  let srv;
+  beforeEach(async () => {
+    const store = {
+      add() {
+        throw new Error('database is locked');
+      },
+    };
+    srv = await startServer({}, { store, importer: { enqueue() {} } });
+  });
+  afterEach(async () => {
+    await srv.close();
+  });
+
+  it('fails the upload and leaves no orphan in importing/', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0003.png');
+    expect(result).toEqual({ ok: false, status: 500 });
+    expect(await fs.readdir(path.join(srv.stagingDir, IMPORT_DIR_NAME))).toEqual([]);
   });
 });

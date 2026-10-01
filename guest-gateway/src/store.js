@@ -50,6 +50,10 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const bumpAttempts = db.prepare(
     'UPDATE uploads SET attempts = attempts + 1, updated_at = ? WHERE upload_id = ? RETURNING attempts',
   );
+  const byDeviceAndIds = (count) =>
+    db.prepare(`
+      SELECT upload_id, filename, status FROM uploads
+      WHERE device_id = ? AND upload_id IN (${Array(count).fill('?').join(', ')})`);
   const byDevice = db.prepare(`
     SELECT upload_id, filename, status, created_at FROM uploads
     WHERE device_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`);
@@ -103,6 +107,14 @@ export function openStore(dbPath, { now = Date.now } = {}) {
         filename: r.filename,
         status: r.status,
       }));
+    },
+
+    /** Status of specific uploads, restricted to the caller's device (unknown ids are skipped). */
+    statusForDevice(deviceId, uploadIds) {
+      if (uploadIds.length === 0) return [];
+      return byDeviceAndIds(uploadIds.length)
+        .all(deviceId, ...uploadIds)
+        .map((r) => ({ id: r.upload_id, filename: r.filename, status: r.status }));
     },
 
     /** Rows still waiting for Immich, oldest first (resumed after a restart). */

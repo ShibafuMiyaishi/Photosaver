@@ -9,6 +9,8 @@ const CSRF_HEADERS = { 'X-Requested-With': 'guest-gateway' };
 const CHUNK_SIZE = 50 * 1024 * 1024;
 const RETRY_DELAYS = [0, 1000, 3000, 5000, 10000, 20000, 30000];
 const POLL_INTERVAL_MS = 3000;
+// Must not exceed MAX_STATUS_IDS in src/app.js.
+const POLL_BATCH = 100;
 const NICKNAME_KEY = 'gw-nickname';
 
 const $ = (id) => document.getElementById(id);
@@ -153,14 +155,19 @@ function uploadIdOf(item) {
 }
 
 function schedulePoll() {
-  if (pollTimer || !items.some((i) => i.status === 'importing')) return;
+  if (pollTimer || !items.some((i) => i.status === 'importing' && i.uploadId)) return;
   pollTimer = setTimeout(pollImports, POLL_INTERVAL_MS);
 }
 
 async function pollImports() {
   pollTimer = null;
+  const waiting = items
+    .filter((i) => i.status === 'importing' && i.uploadId)
+    .slice(0, POLL_BATCH)
+    .map((i) => i.uploadId);
+  if (waiting.length === 0) return;
   try {
-    const res = await api('/api/uploads');
+    const res = await api(`/api/uploads?ids=${waiting.map(encodeURIComponent).join(',')}`);
     if (res.status === 401) {
       show('login');
       return;
