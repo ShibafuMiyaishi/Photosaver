@@ -22,7 +22,14 @@
       <section id="login" hidden>
         <form id="login-form">
           <label for="nickname">ニックネーム(誰が撮ったか分かるように)</label>
-          <input id="nickname" name="nickname" type="text" autocomplete="nickname" required />
+          <input
+            id="nickname"
+            name="nickname"
+            type="text"
+            autocomplete="nickname"
+            maxlength="20"
+            required
+          />
           <label for="password">合言葉</label>
           <input
             id="password"
@@ -59,6 +66,7 @@
             写真・動画を選ぶ
             <input id="files" type="file" accept="image/*,video/*" multiple />
           </label>
+          <p id="pick-note" class="muted" role="status"></p>
 
           <p id="summary" class="summary"></p>
           <ul id="queue" class="queue"></ul>

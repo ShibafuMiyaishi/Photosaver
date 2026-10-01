@@ -2,6 +2,8 @@
 // アップロード失敗の分類と自動再試行の間隔(DOM に触れない純粋な関数。app.js から使い、単体テストもする)。
 // 一時的な失敗(通信エラー・5xx・429 など)は自動でやり直し、直らない失敗(容量超過・形式違いなど)は
 // やり直さない。401 はログインし直すまで待つ(自動再試行しても同じ 401 になるだけ)。
+// 端末側でファイルが読めなくなった場合(iOS がタブを止めている間に一時ファイルが消えた等)も
+// やり直さず、選び直してもらう。
 
 // Pause between automatic re-queues of one failed item while the page stays visible (capped),
 // on top of tus' own RETRY_DELAYS inside each attempt.
@@ -49,4 +51,81 @@ export function isTransientFailure(status) {
 export function autoRetryDelay(attempt, random = Math.random) {
   const base = AUTO_RETRY_DELAYS_MS[Math.min(attempt, AUTO_RETRY_DELAYS_MS.length - 1)];
   return Math.round(base * (1 - JITTER + 2 * JITTER * random()));
+}
+
+// DOMException names for a File whose data the browser can no longer read (e.g. iOS dropped the
+// picker's temporary copy while the tab was suspended, or the file was changed or deleted).
+const UNREADABLE_FILE_ERRORS = new Set(['NotReadableError', 'NotFoundError']);
+
+/**
+ * True when `err` (or an error it wraps as tus' `causingError`) says the file cannot be read.
+ * @param {unknown} err
+ */
+export function isUnreadableFileError(err) {
+  let current = err;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (UNREADABLE_FILE_ERRORS.has(current.name)) return true;
+    current = current.causingError;
+  }
+  return false;
+}
+
+/**
+ * What to do about a failed tus upload.
+ * - 'closed': 410, the event is over.
+ * - 'unreadable': the file itself cannot be read any more; re-sending cannot help, the guest has
+ *   to pick it again. tus-js-client 4.x emits errors that did not come from an HTTP request
+ *   without `originalRequest` (and never retries those itself). In browsers it reads the file
+ *   lazily inside `XMLHttpRequest.send(blob)`, so a read failure there looks like a network error
+ *   (request, no response): the caller probes the file (`canReadFile`) and passes the result.
+ * - 'permanent' / 'login' / 'transient': see isPermanentFailure / isTransientFailure.
+ * @param {{ originalRequest?: unknown, originalResponse?: { getStatus?: () => number } | null }} err
+ * @param {{ fileReadable?: boolean }} [probe] result of canReadFile (true when not probed)
+ * @returns {{ kind: 'closed'|'unreadable'|'permanent'|'login'|'transient', status: number|undefined }}
+ */
+export function classifyUploadError(err, { fileReadable = true } = {}) {
+  const status = err?.originalResponse?.getStatus?.() || undefined;
+  if (status === 410) return { kind: 'closed', status };
+  if (!fileReadable || isUnreadableFileError(err) || (err?.originalRequest == null && !status)) {
+    return { kind: 'unreadable', status };
+  }
+  if (isPermanentFailure(status)) return { kind: 'permanent', status };
+  if (status === 401) return { kind: 'login', status };
+  return { kind: 'transient', status };
+}
+
+/**
+ * Whether the browser can still read the file: reads its first byte. Any failure counts as
+ * unreadable (NotReadableError / NotFoundError in practice).
+ * @param {{ slice: (start: number, end: number) => { arrayBuffer: () => Promise<ArrayBuffer> } }} file
+ */
+export async function canReadFile(file) {
+  try {
+    await file.slice(0, 1).arrayBuffer();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Key that identifies "the same file picked again" (same as the tus fingerprint).
+ * @param {{ name: string, size: number, lastModified: number }} file
+ */
+export function fileKey(file) {
+  return [file.name, file.size, file.lastModified].join(':');
+}
+
+// After this many status answers in a row that do not mention an upload, the page stops asking
+// (e.g. a row the server no longer reports) and shows a neutral "received" text instead.
+export const MAX_STATUS_MISSES = 5;
+
+/**
+ * Count status answers that left an upload out. Returns the new miss count and whether to give up.
+ * @param {number} misses previous count
+ * @param {boolean} listed the upload was in this answer
+ */
+export function nextStatusMisses(misses, listed) {
+  const next = listed ? 0 : misses + 1;
+  return { misses: next, giveUp: next >= MAX_STATUS_MISSES };
 }
