@@ -40,6 +40,7 @@ try {
 
 let store;
 let importer;
+let immich;
 if (config.immich) {
   try {
     store = openStore(config.immich.dbPath);
@@ -47,7 +48,7 @@ if (config.immich) {
     log('error', 'db_unavailable', { error: err.message });
     process.exit(1);
   }
-  const immich = createImmichClient({
+  immich = createImmichClient({
     baseUrl: config.immich.baseUrl,
     shareKey: config.immich.shareKey,
     deleteApiKey: config.immich.deleteApiKey,
@@ -71,7 +72,7 @@ if (config.immich) {
   log('warn', 'speed_test_mode', { reason: 'IMMICH_SHARE_KEY is not set; nothing is imported' });
 }
 
-const { app, tusServer, isClosed } = createApp(config, { store, importer });
+const { app, tusServer, isClosed } = createApp(config, { store, importer, immich });
 
 const server = app.listen(config.port, config.host, () => {
   log('info', 'listening', {

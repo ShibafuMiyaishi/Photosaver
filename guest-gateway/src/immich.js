@@ -7,6 +7,17 @@ import { openAsBlob } from 'node:fs';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UPLOAD_STATUSES = new Set(['created', 'duplicate']);
 
+// Media the gateway may relay, mapped to Immich paths (never built from client input).
+const MEDIA_PATHS = {
+  thumbnail: (id) => `assets/${id}/thumbnail?size=thumbnail`,
+  preview: (id) => `assets/${id}/thumbnail?size=preview`,
+  video: (id) => `assets/${id}/video/playback`,
+  original: (id) => `assets/${id}/original`,
+};
+export const MEDIA_KINDS = Object.keys(MEDIA_PATHS);
+// Only a single, simple byte range is forwarded.
+const RANGE = /^bytes=\d{0,15}-\d{0,15}$/;
+
 export class ImmichError extends Error {
   /**
    * @param {string} op short operation name (safe to log)
@@ -165,6 +176,49 @@ export function createImmichClient({
       const data = await readJson('list', res);
       const items = (data?.assets?.items ?? []).filter((asset) => !asset.isTrashed);
       return { items, nextCursor: data?.assets?.nextCursor ?? null };
+    },
+
+    /**
+     * Open a media stream for one album asset. Only the wait for response headers is time-limited;
+     * the body may stream for as long as the guest keeps downloading (abort via `signal`).
+     * Resolves with the upstream Response (200/206); anything else throws ImmichError.
+     * @param {{ kind: 'thumbnail'|'preview'|'video'|'original', id: string, range?: string,
+     *   signal?: AbortSignal }} request
+     */
+    async fetchMedia({ kind, id, range, signal }) {
+      if (!Object.hasOwn(MEDIA_PATHS, kind) || !isUuid(id)) throw new ImmichError('media', 0);
+      if (!shareKey) throw new ImmichError('media', 0);
+      const headers = { 'x-immich-share-key': shareKey };
+      if (
+        (kind === 'video' || kind === 'original') &&
+        typeof range === 'string' &&
+        RANGE.test(range)
+      ) {
+        headers.range = range;
+      }
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      const headerTimer = setTimeout(() => controller.abort(), timeoutMs);
+      let res;
+      try {
+        res = await fetchImpl(new URL(MEDIA_PATHS[kind](id), root), {
+          headers,
+          signal: controller.signal,
+          redirect: 'error',
+        });
+      } catch {
+        signal?.removeEventListener('abort', onAbort);
+        throw new ImmichError('media', 0);
+      } finally {
+        clearTimeout(headerTimer);
+      }
+      if (res.status !== 200 && res.status !== 206) {
+        signal?.removeEventListener('abort', onAbort);
+        await res.body?.cancel().catch(() => {});
+        throw new ImmichError('media', res.status);
+      }
+      return res;
     },
 
     /**

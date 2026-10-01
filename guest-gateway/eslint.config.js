@@ -14,6 +14,9 @@ const nodeGlobals = {
   AbortSignal: 'readonly',
   AbortController: 'readonly',
   FormData: 'readonly',
+  Response: 'readonly',
+  ReadableStream: 'readonly',
+  TextEncoder: 'readonly',
 };
 
 const browserGlobals = {

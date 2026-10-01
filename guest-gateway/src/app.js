@@ -14,6 +14,7 @@ import {
   verifyPassword,
   verifySession,
 } from './auth.js';
+import { createGalleryRouter } from './gallery.js';
 import { createLockout } from './lockout.js';
 import { log } from './log.js';
 import { createTusServer } from './uploads.js';
@@ -66,9 +67,11 @@ function shortHash(value) {
  * @param {{
  *   store?: ReturnType<import('./store.js').openStore>,
  *   importer?: ReturnType<import('./importer.js').createImporter>,
- * }} [deps] both set = import mode; neither = speed-test mode (files are not imported)
+ *   immich?: ReturnType<import('./immich.js').createImmichClient>,
+ * }} [deps] store + importer = import mode; neither = speed-test mode (files are not imported).
+ *   immich (with store) enables the gallery.
  */
-export function createApp(config, { store, importer } = {}) {
+export function createApp(config, { store, importer, immich } = {}) {
   const app = express();
   const importing = Boolean(store && importer);
   const tusServer = createTusServer(
@@ -174,6 +177,7 @@ export function createApp(config, { store, importer } = {}) {
       authenticated: Boolean(req.gwSession),
       nickname: req.gwSession?.nickname ?? null,
       importing,
+      gallery: Boolean(immich && store),
       closesAt: new Date(config.closesAt),
     });
   });
@@ -273,6 +277,12 @@ export function createApp(config, { store, importer } = {}) {
     }
     return res.json({ uploads: store.statusForDevice(deviceId, ids) });
   });
+
+  if (immich && store) {
+    const gallery = createGalleryRouter({ immich, store, albumId: config.immich.albumId });
+    app.use(['/api/assets', '/media'], requireSession);
+    app.use(gallery);
+  }
 
   app.all(TUS_ROUTE, requireSession, (req, res, next) => {
     // GET would let tus serve staged files back; OPTIONS/DELETE are not needed.

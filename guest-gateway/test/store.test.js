@@ -66,4 +66,19 @@ describe('upload store', () => {
     ]);
     expect(store.statusForDevice('dev-1', [])).toEqual([]);
   });
+
+  it('maps assets to their first creating uploader and ownership', () => {
+    const asset = '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    store.add({ ...ROW, uploadId: 'first', deviceId: 'dev-2', nickname: 'はなこ' });
+    store.markImported('first', 'created', asset);
+    store.add({ ...ROW, uploadId: 'again' });
+    store.markImported('again', 'duplicate', asset);
+    store.add({ ...ROW, uploadId: 'pending' });
+
+    expect(store.uploaders([asset, 'unknown'], 'dev-1')).toEqual(
+      new Map([[asset, { nickname: 'はなこ', mine: false }]]),
+    );
+    expect(store.uploaders([asset], 'dev-2').get(asset).mine).toBe(true);
+    expect(store.uploaders([], 'dev-1').size).toBe(0);
+  });
 });
