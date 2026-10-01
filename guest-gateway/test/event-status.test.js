@@ -56,6 +56,21 @@ describe('event status', () => {
     expect(warnings[1]).toMatch(/failed\/.*requeue-failed\.js/);
   });
 
+  it('shows uploads still arriving and the bytes they will still write', () => {
+    const { lines } = formatStatus(stats(), {
+      now: NOW,
+      closesAt: null,
+      freeBytes: null,
+      receiving: { count: 3, bytes: 2 * 1024 ** 3 },
+    });
+    expect(lines).toContain('受信途中: 3件 (あと2.0 GB)');
+    expect(
+      formatStatus(stats(), { now: NOW, closesAt: null, freeBytes: null }).lines.some((l) =>
+        l.startsWith('受信途中'),
+      ),
+    ).toBe(false);
+  });
+
   it('does not warn about a pending row that only just arrived', () => {
     const { warnings } = formatStatus(
       stats({ byStatus: { pending: { count: 1, bytes: 1 } }, oldestPendingAt: NOW - 30_000 }),

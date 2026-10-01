@@ -4,6 +4,8 @@
 // Immich が拒否したとき(共有リンクの設定変更でも起きる)や再試行の上限では失敗として確定するが、
 // ファイルは消さずに failed/ へ移す(元の写真のバックアップは無いため。scripts/requeue-failed.js で
 // 取り込み待ちに戻せる)。状態は store にあるので再起動しても再開できる。
+// 結果が分からないまま終わった送信(通信断・時間切れ・停止・5xx)の後の再送が「重複」になったら、
+// それは自分の前回の送信が届いていたものとみなし、他に作成者がいなければ「作成」として記録する。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -22,6 +24,15 @@ export const DEFAULT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 
 export const DEFAULT_MAX_ATTEMPTS = 300;
 // tus ids are random hex; anything else must never be joined into a path.
 export const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Whether a failed attempt may still have stored the file in Immich: no response at all
+ * (network error, timeout, abort — the body may have been sent), a server error, or a success
+ * status whose body we could not read. A 4xx means Immich refused it.
+ */
+export function isAmbiguousFailure(status) {
+  return status === 0 || status >= 500 || (status >= 200 && status < 300);
+}
 
 /**
  * dir: importing/ (one file per upload id). failedDir: where given-up files are moved; must be
@@ -97,6 +108,8 @@ export function createImporter({
       return 'done';
     }
 
+    // Read before addAttempt, which turns an attempt left open by a crash into ambiguity.
+    const ambiguousBefore = store.hadAmbiguousAttempt(uploadId);
     const attempts = store.addAttempt(uploadId);
     try {
       const result = await immich.uploadAsset({
@@ -112,18 +125,28 @@ export function createImporter({
       if (status === 'duplicate' && store.wasDeleted(result.id)) {
         if (await immich.isAssetVisible(result.id)) store.clearDeleted(result.id);
         else status = 'trashed';
+      } else if (status === 'duplicate' && ambiguousBefore && !store.isCreatedByAnyone(result.id)) {
+        // Most likely our own earlier attempt created it and the answer was lost: credit this
+        // device (uploader name, own-delete) as if that attempt had succeeded.
+        status = 'created';
+        log('info', 'import_duplicate_reclaimed', { id: uploadId, attempts });
       }
       store.markImported(uploadId, status, result.id);
       log('info', 'import_done', { id: uploadId, status, attempts });
       await discard(uploadId);
       return 'done';
     } catch (err) {
-      // Shutting down: leave the row pending; the next start resumes it.
-      if (stopController.signal.aborted) return 'done';
+      // Shutting down: leave the row pending; the next start resumes it. The aborted request may
+      // already have reached Immich.
+      if (stopController.signal.aborted) {
+        store.endAttempt(uploadId, { ambiguous: true });
+        return 'done';
+      }
       const status = err instanceof ImmichError ? err.status : 0;
       if (!(err instanceof ImmichError)) {
         log('error', 'import_unexpected_error', { id: uploadId, error: err?.message });
       }
+      store.endAttempt(uploadId, { ambiguous: isAmbiguousFailure(status) });
       if (PERMANENT_STATUSES.has(status) || attempts >= maxAttempts) {
         // Move the file before marking the row failed: requeue-failed.js only picks up failed
         // rows, so it never sees one whose file is still on its way to failed/.
