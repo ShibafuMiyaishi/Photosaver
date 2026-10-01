@@ -53,6 +53,7 @@ describe('event status', () => {
     expect(warnings).toHaveLength(2);
     expect(warnings[0]).toMatch(/import_retry/);
     expect(warnings[1]).toMatch(/import_failed/);
+    expect(warnings[1]).toMatch(/failed\/.*requeue-failed\.js/);
   });
 
   it('does not warn about a pending row that only just arrived', () => {

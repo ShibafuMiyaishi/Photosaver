@@ -56,6 +56,12 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   cannot dial tailnet peers directly (inferred from the docker-params doc; verify).
 - Staging for in-progress uploads lives on the photo HDD (e.g. `/mnt/photo/guest-gateway/staging`),
   never on the Postgres NVMe. Check the mount marker before accepting uploads.
+- Never delete a guest's original unless Immich has it (`created`/`duplicate`/`trashed`): originals
+  have no backup. When the importer gives up (Immich 400/413/415/422 — a 400 also comes from an
+  operator switching the link's upload off or recreating it — or max attempts) the row becomes
+  `failed` and the file is renamed into `staging/failed/` (left in `importing/` if that fails).
+  `purgeStaging` and tus expiry never touch `failed/`; `scripts/requeue-failed.js --apply` moves
+  files back to `importing/` and resets rows to `pending` (attempts 0), picked up on the next start.
 
 ## Credentials (env only, never in repo, HTML, URLs, or logs)
 
@@ -121,15 +127,21 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
    Never read a whole file into memory.
 5. File type allowlist checked by extension AND magic bytes (`file-type`):
    jpg jpeg heic heif png webp gif avif mov mp4 m4v 3gp. Reject SVG, PDF, archives. Max 4 GB per file.
-6. Password: scrypt hash + `crypto.timingSafeEqual`. Login lockout per IP (/64 for IPv6):
-   5 failures / 15 min → lock, doubling, cap 24 h; global failure spike → temporary pause.
-   `trust proxy` = 1 (tailscaled overwrites `X-Forwarded-For`; verify the real client IP in the speed test).
+6. Password: scrypt hash + `crypto.timingSafeEqual`. Login lockout per IP (/64 for IPv6), tuned for
+   venue Wi-Fi (many guests behind one NAT): 20 failures / 15 min → 2 min lock, doubling, cap 1 h
+   (`LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES`); 300 failures / 15 min globally → 5 min pause.
+   The outer express-rate-limit (30 / 15 min per IP) counts only malformed requests, never 401/429.
+   `trust proxy` = 1: tailscaled's serve proxy (v1.102 `ipn/ipnlocal/serve.go`
+   `addProxyForwardedHeaders`, Go `ReverseProxy.Rewrite`) drops incoming `X-Forwarded-For` and sets
+   it to the single source address — for Funnel the `Tailscale-Ingress-Src` the relay reported
+   (source-read 2026-10-01; still confirm with `/api/whoami` in the speed test).
 7. Cookie `__Host-sid`: HttpOnly, Secure, Path=/, SameSite=Lax, HMAC-signed `{deviceId, nickname, role, exp}`.
    CSRF: exact `Origin` match + reject `Sec-Fetch-Site: cross-site` + required custom header on mutations.
 8. helmet with CSP `'self'` (+ `blob:`/`data:` for img/media), `Referrer-Policy: no-referrer`,
    `X-Robots-Tag: noindex, nofollow, noarchive`, `robots.txt` Disallow all.
 9. Logs: method, route, status, duration, short hash of deviceId. Never keys, cookies, passwords.
-10. After the deadline: all routes show the closed page / 410, staging dir is purged.
+10. After the deadline: all routes show the closed page / 410, staging dir is purged (except
+    `importing/` while imports run, and `failed/`).
 
 ## Gallery relay contract (src/gallery.js)
 

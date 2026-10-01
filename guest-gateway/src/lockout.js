@@ -7,13 +7,24 @@ import { log } from './log.js';
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
+// Tuned for a venue: many guests share one public IP (venue Wi-Fi, carrier NAT), so honest
+// typos from everyone there add up on one key, and a lock hits them all. The shared password
+// only opens a guest album; scrypt, one check in flight per key, the doubling lock and the
+// global pause still bound guessing (per key roughly 20 tries per hour once the lock is capped).
+// maxFailures / baseLockMs can be tuned without code changes (LOGIN_MAX_FAILURES /
+// LOGIN_LOCK_MINUTES, see config.js).
 export const LOCKOUT_DEFAULTS = {
   windowMs: 15 * MINUTE_MS,
-  maxFailures: 5,
-  baseLockMs: 15 * MINUTE_MS,
-  maxLockMs: 24 * HOUR_MS,
+  maxFailures: 20,
+  // 2, 4, 8, ... minutes, capped at an hour: a venue that trips it is back in minutes.
+  baseLockMs: 2 * MINUTE_MS,
+  maxLockMs: HOUR_MS,
   levelResetMs: 24 * HOUR_MS,
-  globalMaxFailures: 100,
+  // Pauses ALL logins, so honest traffic must never reach it: even 100+ guests arriving within
+  // 15 minutes with two typos each stay well below it (the old 100 did not). A distributed
+  // attack is still held to about 300 guesses per 15 minutes (the pause re-arms at once while
+  // the window is still full).
+  globalMaxFailures: 300,
   globalPauseMs: 5 * MINUTE_MS,
   maxKeys: 10_000,
   pruneIntervalMs: MINUTE_MS,

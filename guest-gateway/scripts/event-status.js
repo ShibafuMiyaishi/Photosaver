@@ -70,7 +70,8 @@ export function formatStatus(stats, { now, closesAt, freeBytes }) {
   }
   if (stats.byStatus.failed.count > 0) {
     warnings.push(
-      '取り込みに失敗したファイルがあります(受信したファイルは削除済み)。ログの import_failed を確認してください',
+      '取り込みに失敗したファイルがあります(ファイルはステージングの failed/ に残っています)。' +
+        'ログの import_failed で原因を確認し、直したら scripts/requeue-failed.js で取り込み待ちに戻せます',
     );
   }
   return { lines, warnings };

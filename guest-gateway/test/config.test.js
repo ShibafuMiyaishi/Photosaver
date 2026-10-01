@@ -20,6 +20,15 @@ describe('loadConfig', () => {
     expect(config.closesAt).toBe(Date.parse(VALID.CLOSES_AT));
     expect(config.immich).toBeNull();
     expect(config.adminPasswordHash).toBe('');
+    expect(config.loginMaxFailures).toBe(20);
+    expect(config.loginLockMs).toBe(2 * 60 * 1000);
+  });
+
+  it('reads the login lockout tuning', () => {
+    const config = loadConfig({ ...VALID, LOGIN_MAX_FAILURES: '30', LOGIN_LOCK_MINUTES: '0.5' });
+    expect(config.loginMaxFailures).toBe(30);
+    expect(config.loginLockMs).toBe(30 * 1000);
+    expect(loadConfig({ ...VALID, LOGIN_LOCK_MINUTES: '60' }).loginLockMs).toBe(60 * 60 * 1000);
   });
 
   const IMPORT = {
@@ -59,6 +68,11 @@ describe('loadConfig', () => {
     ['missing staging dir', { STAGING_DIR: '' }],
     ['negative size', { MAX_FILE_GB: '-1' }],
     ['non-scrypt admin hash', { ADMIN_PASSWORD_HASH: 'plaintext-password' }],
+    ['zero login failures', { LOGIN_MAX_FAILURES: '0' }],
+    ['fractional login failures', { LOGIN_MAX_FAILURES: '2.5' }],
+    ['non-numeric login failures', { LOGIN_MAX_FAILURES: 'many' }],
+    ['negative lock minutes', { LOGIN_LOCK_MINUTES: '-1' }],
+    ['lock longer than the cap', { LOGIN_LOCK_MINUTES: '61' }],
   ])('rejects %s', (_label, override) => {
     expect(() => loadConfig({ ...VALID, ...override })).toThrow();
   });

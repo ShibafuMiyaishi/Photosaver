@@ -47,31 +47,40 @@ describe('clientKey', () => {
 });
 
 describe('createLockout', () => {
-  it('locks an address on the 5th failure within 15 minutes for 15 minutes', () => {
+  it('locks an address on the 20th failure within 15 minutes for 2 minutes', () => {
     const { clock, lockout } = setup();
-    fail(lockout, '203.0.113.7', 4);
+    fail(lockout, '203.0.113.7', 19);
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
     lockout.recordFailure('203.0.113.7');
-    expect(lockout.check('203.0.113.7')).toEqual({ allowed: false, retryAfterMs: 15 * MIN });
+    expect(lockout.check('203.0.113.7')).toEqual({ allowed: false, retryAfterMs: 2 * MIN });
     // Other addresses are unaffected.
     expect(lockout.check('198.51.100.1').allowed).toBe(true);
-    clock.advance(15 * MIN);
+    clock.advance(2 * MIN);
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
+  });
+
+  it('takes the threshold and first lock from options (LOGIN_MAX_FAILURES / _LOCK_MINUTES)', () => {
+    const { clock, lockout } = setup({ maxFailures: 3, baseLockMs: 5 * MIN });
+    fail(lockout, '203.0.113.7', 3);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(5 * MIN);
+    clock.advance(5 * MIN);
+    fail(lockout, '203.0.113.7', 3);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(10 * MIN);
   });
 
   it('only counts failures inside the rolling 15-minute window', () => {
     const { clock, lockout } = setup();
-    fail(lockout, '203.0.113.7', 4);
+    fail(lockout, '203.0.113.7', 19);
     clock.advance(15 * MIN + 1);
     lockout.recordFailure('203.0.113.7');
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
   });
 
-  it('doubles the lock for repeat offenders and caps it at 24 hours', () => {
+  it('doubles the lock for repeat offenders and caps it at an hour', () => {
     const { clock, lockout } = setup();
-    const expected = [15 * MIN, 30 * MIN, HOUR, 2 * HOUR, 4 * HOUR, 8 * HOUR, 16 * HOUR, 24 * HOUR];
+    const expected = [2 * MIN, 4 * MIN, 8 * MIN, 16 * MIN, 32 * MIN, HOUR, HOUR];
     for (const lockMs of expected) {
-      fail(lockout, '203.0.113.7', 5);
+      fail(lockout, '203.0.113.7', 20);
       expect(lockout.check('203.0.113.7').retryAfterMs).toBe(lockMs);
       clock.advance(lockMs);
     }
@@ -79,49 +88,61 @@ describe('createLockout', () => {
 
   it('resets the lock level 24 hours after the last failure', () => {
     const { clock, lockout } = setup();
-    fail(lockout, '203.0.113.7', 5);
-    clock.advance(15 * MIN);
-    fail(lockout, '203.0.113.7', 5);
-    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(30 * MIN);
+    fail(lockout, '203.0.113.7', 20);
+    clock.advance(2 * MIN);
+    fail(lockout, '203.0.113.7', 20);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(4 * MIN);
     clock.advance(24 * HOUR);
-    fail(lockout, '203.0.113.7', 5);
-    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(15 * MIN);
+    fail(lockout, '203.0.113.7', 20);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(2 * MIN);
   });
 
   it('clears the failure count on success but keeps the lock level', () => {
     const { clock, lockout } = setup();
-    fail(lockout, '203.0.113.7', 4);
+    fail(lockout, '203.0.113.7', 19);
     lockout.recordSuccess('203.0.113.7');
-    fail(lockout, '203.0.113.7', 4);
+    fail(lockout, '203.0.113.7', 19);
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
     lockout.recordFailure('203.0.113.7');
-    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(15 * MIN);
-    clock.advance(15 * MIN);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(2 * MIN);
+    clock.advance(2 * MIN);
     lockout.recordSuccess('203.0.113.7');
-    fail(lockout, '203.0.113.7', 5);
-    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(30 * MIN);
+    fail(lockout, '203.0.113.7', 20);
+    expect(lockout.check('203.0.113.7').retryAfterMs).toBe(4 * MIN);
   });
 
   it('shares one lock across an IPv6 /64 and across IPv4-mapped forms', () => {
     const { lockout } = setup();
-    for (let i = 1; i <= 5; i += 1) lockout.recordFailure(`2001:db8:1:2::${i}`);
+    for (let i = 1; i <= 20; i += 1) lockout.recordFailure(`2001:db8:1:2::${i}`);
     expect(lockout.check('2001:db8:1:2:dead:beef:0:1').allowed).toBe(false);
     expect(lockout.check('2001:db8:1:3::1').allowed).toBe(true);
 
-    fail(lockout, '::ffff:198.51.100.9', 3);
-    fail(lockout, '198.51.100.9', 2);
+    fail(lockout, '::ffff:198.51.100.9', 10);
+    fail(lockout, '198.51.100.9', 10);
     expect(lockout.check('198.51.100.9').allowed).toBe(false);
   });
 
-  it('pauses all logins for 5 minutes after 100 failures in 15 minutes', () => {
+  it('pauses all logins for 5 minutes after 300 failures in 15 minutes', () => {
     const { clock, lockout } = setup();
-    for (let i = 0; i < 99; i += 1) lockout.recordFailure(`198.51.100.${i}`);
+    for (let i = 0; i < 299; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
     lockout.recordFailure('198.51.100.200');
     expect(lockout.check('203.0.113.7')).toEqual({ allowed: false, retryAfterMs: 5 * MIN });
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('login_global_pause'));
     clock.advance(5 * MIN);
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
+  });
+
+  it('lets a venue NAT absorb many honest typos without a global pause', () => {
+    const { clock, lockout } = setup();
+    // 150 guests behind 3 shared addresses, one typo each, all within 15 minutes.
+    for (let i = 0; i < 150; i += 1) {
+      lockout.recordFailure(`203.0.113.${i % 3}`);
+      lockout.recordSuccess(`203.0.113.${i % 3}`);
+      clock.advance(5_000);
+    }
+    expect(lockout.check('203.0.113.0').allowed).toBe(true);
+    expect(lockout.check('198.51.100.1').allowed).toBe(true);
   });
 
   it('keeps memory bounded by dropping the oldest addresses', () => {
@@ -224,15 +245,15 @@ describe('beginAttempt', () => {
 
   it('rejects locked addresses and the global pause without reserving a slot', () => {
     const { clock, lockout } = setup();
-    fail(lockout, '203.0.113.7', 5);
+    fail(lockout, '203.0.113.7', 20);
     expect(lockout.beginAttempt('203.0.113.7')).toEqual({
       ok: false,
       reason: 'locked',
-      retryAfterSec: 15 * 60,
+      retryAfterSec: 2 * 60,
     });
     expect(lockout.inFlight()).toBe(0);
 
-    for (let i = 0; i < 100; i += 1) lockout.recordFailure(`198.51.100.${i}`);
+    for (let i = 0; i < 300; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
     expect(lockout.beginAttempt('192.0.2.1')).toEqual({
       ok: false,
       reason: 'paused',

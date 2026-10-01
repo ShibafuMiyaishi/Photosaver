@@ -2,8 +2,8 @@
 // tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・空き容量を検査し、
 // 受信完了時にファイルの中身(マジックバイト)を判定して計測ログを出す。
 // 取り込みモードでは完了したファイルをステージング内の importing/ に移し、onReceived で
-// 取り込みキューに渡す。速度検証モードでは受信後に削除する
-// (KEEP_UPLOADS=true のときは kept/ に移して残す)。
+// 取り込みキューに渡す(取り込みを諦めたファイルは取り込みキューが failed/ に移して残す)。
+// 速度検証モードでは受信後に削除する(KEEP_UPLOADS=true のときは kept/ に移して残す)。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -48,10 +48,13 @@ export const ALLOWED_MIME_TYPES = new Set([
 // Staging is purged at CLOSES_AT anyway.
 const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
 
-// Finished files live outside the tus-managed entries so tus expiry never touches them:
-// kept/ for inspection (KEEP_UPLOADS=true), importing/ while waiting for Immich.
+// Finished files live outside the tus-managed entries so tus expiry never touches them
+// (@tus/file-store only expires top-level `<id>` files that have an `<id>.json` next to them):
+// kept/ for inspection (KEEP_UPLOADS=true), importing/ while waiting for Immich, failed/ for
+// files the importer gave up on (kept for scripts/requeue-failed.js; originals have no backup).
 export const KEPT_DIR_NAME = 'kept';
 export const IMPORT_DIR_NAME = 'importing';
+export const FAILED_DIR_NAME = 'failed';
 
 /** Strip path parts and control characters; keep the name readable for Immich later. */
 export function sanitizeFilename(name) {
@@ -268,13 +271,15 @@ export function createTusServer(config, { onReceived } = {}) {
 }
 
 /**
- * Remove everything in the staging dir (used once the deadline has passed).
+ * Remove everything in the staging dir (used once the deadline has passed). failed/ is always
+ * left alone: it holds originals Immich did not take, and only the operator may drop them.
  * @param {string} stagingDir
- * @param {{ keep?: string[] }} [options] entry names to leave alone (e.g. importing/ while
- *   the import queue is still working through it)
+ * @param {{ keep?: string[] }} [options] further entry names to leave alone (e.g. importing/
+ *   while the import queue is still working through it)
  */
 export async function purgeStaging(stagingDir, { keep = [] } = {}) {
-  const entries = (await fs.readdir(stagingDir).catch(() => [])).filter((n) => !keep.includes(n));
+  const kept = new Set([FAILED_DIR_NAME, ...keep]);
+  const entries = (await fs.readdir(stagingDir).catch(() => [])).filter((n) => !kept.has(n));
   await Promise.all(
     entries.map((name) => fs.rm(path.join(stagingDir, name), { recursive: true, force: true })),
   );
