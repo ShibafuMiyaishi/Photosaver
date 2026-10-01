@@ -6,8 +6,8 @@
 import { DatabaseSync } from 'node:sqlite';
 
 // pending: waiting for / retrying the Immich upload. created / duplicate: in the album.
-// failed: given up (the staged file is gone).
-export const STATUSES = ['pending', 'created', 'duplicate', 'failed'];
+// failed: given up (the staged file is gone). deleted: the asset was moved to Immich's trash.
+export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'deleted'];
 const UPLOADER_CHUNK = 500;
 
 const SCHEMA = `
@@ -69,6 +69,12 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const uploaderFullChunk = db.prepare(uploaderSql(UPLOADER_CHUNK));
   const uploaderOf = (count) =>
     count === UPLOADER_CHUNK ? uploaderFullChunk : db.prepare(uploaderSql(count));
+  const ownCreated = db.prepare(
+    "SELECT 1 FROM uploads WHERE asset_id = ? AND device_id = ? AND status = 'created' LIMIT 1",
+  );
+  const setDeleted = db.prepare(
+    "UPDATE uploads SET status = 'deleted', updated_at = ? WHERE asset_id = ? AND status IN ('created', 'duplicate')",
+  );
   const pending = db.prepare(
     "SELECT * FROM uploads WHERE status = 'pending' ORDER BY created_at, rowid",
   );
@@ -144,6 +150,19 @@ export function openStore(dbPath, { now = Date.now } = {}) {
         }
       }
       return result;
+    },
+
+    /**
+     * True when this device's upload created the asset. A duplicate upload of someone else's
+     * photo does not make it the caller's to delete.
+     */
+    isOwnAsset(assetId, deviceId) {
+      return ownCreated.get(assetId, deviceId) !== undefined;
+    },
+
+    /** The asset went to Immich's trash: it no longer belongs to anyone's uploads. */
+    markDeleted(assetId) {
+      setDeleted.run(now(), assetId);
     },
 
     /** Rows still waiting for Immich, oldest first (resumed after a restart). */

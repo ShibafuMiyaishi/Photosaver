@@ -183,12 +183,18 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    admin password (`read -rs`), run `scripts/setup-event.js` on `--network photosaver_gw` with
    `--out /out/immich.env`. Verify only `ls -l /srv/photosaver/guest-gateway/immich.env` (mode 600)
    and `grep -c '^IMMICH_' /srv/photosaver/guest-gateway/immich.env` → 3. Never print the file.
-3. Follow **「取り込みモードに切り替える」**: recreate `guest-gateway`, check the log shows `immich_ok`
+3. Organiser password (optional but recommended): the user types a password different from the
+   guest one; generate its hash like GUEST_PASSWORD_HASH (`docker run ... node scripts/hash-password.js`)
+   and put it in `.env` as `ADMIN_PASSWORD_HASH=` (never echo it). Logging in with it enables deleting
+   any photo.
+4. Follow **「取り込みモードに切り替える」**: recreate `guest-gateway`, check the log shows `immich_ok`
    with version >= 3.2.4.
-4. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
+5. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
    the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,
    and `docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
    Upload the same photo again → 「同じ写真が既にアルバムにあります」.
-5. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
+   Open 「みんなの写真」: view, play the video, save a photo (share sheet → Photos), delete the test
+   photo (own upload); with the organiser password, delete the test video.
+6. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

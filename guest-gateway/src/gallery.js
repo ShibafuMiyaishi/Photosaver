@@ -72,6 +72,7 @@ function compareAssets(a, b) {
  *   store: ReturnType<import('./store.js').openStore>,
  *   albumId: string,
  *   closesAt: number,
+ *   deleteEnabled?: boolean,
  *   now?: () => number,
  *   heavyIdleMs?: number,
  * }} deps
@@ -81,6 +82,7 @@ export function createGalleryRouter({
   store,
   albumId,
   closesAt,
+  deleteEnabled = false,
   now = Date.now,
   heavyIdleMs = HEAVY_IDLE_MS,
 }) {
@@ -160,6 +162,34 @@ export function createGalleryRouter({
       return res.send(await gzip(body));
     }
     return res.send(body);
+  });
+
+  // Guests delete what their own device uploaded; the organiser (admin) deletes anything.
+  // Never `force`: assets go to the event user's trash and can be restored in Immich.
+  router.delete('/api/assets/:id', async (req, res, next) => {
+    const { id } = req.params;
+    if (!isUuid(id) || !deleteEnabled) return next();
+    const { deviceId, role } = req.gwSession;
+    if (role !== 'admin' && !store.isOwnAsset(id, deviceId)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    try {
+      await immich.deleteAssets([id]);
+    } catch (err) {
+      const status = err.status ?? 0;
+      if (status >= 400 && status < 500) return res.status(404).json({ error: 'not_found' });
+      log('error', 'asset_delete_failed', { status, error: err.message });
+      return res.status(502).json({ error: 'unavailable' });
+    }
+    store.markDeleted(id);
+    // The next listing must not show it any more.
+    cache = null;
+    log('info', 'asset_deleted', {
+      asset: id.slice(0, 8),
+      role,
+      device: req.gwSession.deviceShort,
+    });
+    return res.json({ ok: true });
   });
 
   router.get('/media/:id/:kind', async (req, res, next) => {

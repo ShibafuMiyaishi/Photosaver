@@ -237,7 +237,8 @@ main .tile {
   display: none;
 }
 
-.pswp__button.gw-save {
+.pswp__button.gw-save,
+.pswp__button.gw-delete {
   width: auto;
   padding: 0 14px;
   color: #fff;
@@ -254,4 +255,12 @@ main .tile {
   width: 100%;
   height: 100%;
   background: #000;
+}
+
+.pswp__button.gw-delete {
+  color: #ffb4a9;
+}
+
+.pswp__button.gw-delete[hidden] {
+  display: none;
 }

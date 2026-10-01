@@ -24,6 +24,8 @@ let importing = false;
 let pollTimer = null;
 // Set once the server reports the gallery (import mode).
 let galleryEnabled = false;
+// Role and delete availability from the server (admin = organiser, may delete anything).
+const permissions = { role: 'guest', canDelete: false };
 let gallery = null;
 
 function formatBytes(bytes) {
@@ -126,6 +128,7 @@ function showTab(name) {
   $('tab-gallery').setAttribute('aria-pressed', String(name === 'gallery'));
   if (name === 'gallery') {
     gallery ??= initGallery(api, { onUnauthorized: () => show('login') });
+    gallery.setPermissions({ ...permissions });
     gallery.show();
   }
 }
@@ -137,7 +140,8 @@ function enterApp() {
 }
 
 function setGreeting(nickname) {
-  $('greeting').textContent = nickname ? `${nickname} さん、ようこそ` : '';
+  const admin = permissions.role === 'admin' ? '(管理者モード: すべての写真を削除できます)' : '';
+  $('greeting').textContent = nickname ? `${nickname} さん、ようこそ${admin}` : '';
 }
 
 function rememberNickname(nickname) {
@@ -396,9 +400,13 @@ async function init() {
     closesAt,
     importing: importEnabled,
     gallery: galleryOn,
+    role,
+    canDelete,
   } = await res.json();
   importing = Boolean(importEnabled);
   galleryEnabled = Boolean(galleryOn);
+  permissions.role = role ?? 'guest';
+  permissions.canDelete = Boolean(canDelete);
   $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
   if (authenticated) {
     setGreeting(nickname);
@@ -426,6 +434,8 @@ async function submitLogin() {
   }
   if (res.ok) {
     $('password').value = '';
+    const { role } = await res.json().catch(() => ({}));
+    permissions.role = role ?? 'guest';
     const nickname = $('nickname').value.trim();
     rememberNickname(nickname);
     setGreeting(nickname);

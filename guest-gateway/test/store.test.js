@@ -91,4 +91,19 @@ describe('upload store', () => {
     expect(found.size).toBe(1201);
     expect(found.get('asset-1200').nickname).toBe('n1200');
   });
+
+  it('decides ownership by created uploads only and forgets deleted assets', () => {
+    const asset = '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    store.add({ ...ROW, uploadId: 'mine' });
+    store.markImported('mine', 'created', asset);
+    store.add({ ...ROW, uploadId: 'copy', deviceId: 'dev-2' });
+    store.markImported('copy', 'duplicate', asset);
+    expect(store.isOwnAsset(asset, 'dev-1')).toBe(true);
+    expect(store.isOwnAsset(asset, 'dev-2')).toBe(false);
+
+    store.markDeleted(asset);
+    expect(store.isOwnAsset(asset, 'dev-1')).toBe(false);
+    expect(store.uploaders([asset]).size).toBe(0);
+    expect(store.get('copy').status).toBe('deleted');
+  });
 });

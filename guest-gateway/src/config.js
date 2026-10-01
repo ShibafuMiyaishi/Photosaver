@@ -72,6 +72,12 @@ export function loadConfig(env = process.env) {
     throw fail('GUEST_PASSWORD_HASH is missing or not a scrypt hash (scripts/hash-password.js)');
   }
 
+  // Optional: the organiser's password; logging in with it enables deleting any asset.
+  const adminPasswordHash = env.ADMIN_PASSWORD_HASH ?? '';
+  if (adminPasswordHash !== '' && !adminPasswordHash.startsWith('scrypt:')) {
+    throw fail('ADMIN_PASSWORD_HASH must be a scrypt hash (scripts/hash-password.js) or empty');
+  }
+
   const closesAt = Date.parse(env.CLOSES_AT ?? '');
   if (!Number.isFinite(closesAt)) {
     throw fail('CLOSES_AT must be an ISO-8601 date-time with timezone');
@@ -87,6 +93,7 @@ export function loadConfig(env = process.env) {
     port,
     sessionSecret,
     guestPasswordHash,
+    adminPasswordHash,
     closesAt,
     stagingDir,
     // Container path of the HDD mount marker file; empty disables the check (local dev/tests).

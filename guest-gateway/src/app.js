@@ -183,6 +183,8 @@ export function createApp(config, { store, importer, immich } = {}) {
     res.json({
       authenticated: Boolean(req.gwSession),
       nickname: req.gwSession?.nickname ?? null,
+      role: req.gwSession?.role ?? null,
+      canDelete: Boolean(immich && store && config.immich?.deleteApiKey),
       importing,
       gallery: Boolean(immich && store),
       closesAt: new Date(config.closesAt),
@@ -244,13 +246,22 @@ export function createApp(config, { store, importer, immich } = {}) {
       return res.status(429).json({ error });
     }
     try {
-      if (!(await verifyPassword(password, config.guestPasswordHash))) {
+      // Guest first: if both passwords were ever set to the same value, nobody becomes admin.
+      let role = null;
+      if (await verifyPassword(password, config.guestPasswordHash)) role = 'guest';
+      else if (
+        config.adminPasswordHash &&
+        (await verifyPassword(password, config.adminPasswordHash))
+      ) {
+        role = 'admin';
+      }
+      if (!role) {
         log('warn', 'login_failed', { ip: req.ip });
         lockout.recordFailure(req.ip);
         return res.status(401).json({ error: 'wrong_password' });
       }
       lockout.recordSuccess(req.ip);
-      const session = { deviceId: newDeviceId(), nickname, role: 'guest', exp: config.closesAt };
+      const session = { deviceId: newDeviceId(), nickname, role, exp: config.closesAt };
       res.cookie(cookieName(config), signSession(session, config.sessionSecret), {
         httpOnly: true,
         secure: config.cookieSecure,
@@ -258,8 +269,8 @@ export function createApp(config, { store, importer, immich } = {}) {
         path: '/',
         maxAge: Math.max(0, config.closesAt - Date.now()),
       });
-      log('info', 'login_ok', { device: shortHash(session.deviceId) });
-      return res.json({ ok: true });
+      log('info', 'login_ok', { device: shortHash(session.deviceId), role });
+      return res.json({ ok: true, role });
     } finally {
       attempt.release();
     }
@@ -291,6 +302,7 @@ export function createApp(config, { store, importer, immich } = {}) {
       store,
       albumId: config.immich.albumId,
       closesAt: config.closesAt,
+      deleteEnabled: Boolean(config.immich.deleteApiKey),
       heavyIdleMs: config.mediaIdleMs,
     });
     app.use(['/api/assets', '/media'], requireSession);

@@ -4,6 +4,7 @@
 // 原寸の先読みはしない(ゲスト全員が見るだけで数 GB になるため)。1 回目のタップで準備、2 回目で保存。
 // サムネイルは画面に近いものから同時 12 件までに絞って読み込む(窓口の同時配信上限 48 より十分下)。
 // 動画は表示中のスライドだけが通信する(窓口の動画・原寸の上限は端末あたり 4 本)。
+// 削除は自分の投稿(管理者モードなら全件)だけ、2 回タップで確定。Immich のゴミ箱へ移る。
 
 import PhotoSwipeLightbox from '/vendor/photoswipe/photoswipe-lightbox.esm.min.js';
 
@@ -15,6 +16,8 @@ const THUMB_RETRY_MS = [2000, 4000, 8000, 15000, 30000, 60000, 60000, 60000];
 // Start loading thumbnails a little before they scroll into view.
 const THUMB_ROOT_MARGIN = '600px 0px';
 const REFRESH_AFTER_MS = 30_000;
+// The second tap on 「削除」 must come within this time.
+const DELETE_CONFIRM_MS = 4000;
 
 const $ = (id) => document.getElementById(id);
 
@@ -25,6 +28,9 @@ let lightbox = null;
 let loadedAt = 0;
 let loading = null;
 let onUnauthorized = () => {};
+let apiFetch = null;
+// { role, canDelete } from the session.
+let permissions = { role: 'guest', canDelete: false };
 // Prepared original for the share sheet: assetId → File (only the photo being saved).
 const prepared = new Map();
 
@@ -269,6 +275,46 @@ async function onSave(button, asset) {
   }
 }
 
+function canDeleteAsset(asset) {
+  return permissions.canDelete && (asset.mine || permissions.role === 'admin');
+}
+
+async function onDelete(button, asset) {
+  if (button.dataset.confirm !== asset.id) {
+    button.dataset.confirm = asset.id;
+    button.textContent = '本当に削除';
+    setTimeout(() => {
+      if (button.dataset.confirm !== asset.id) return;
+      delete button.dataset.confirm;
+      button.textContent = '削除';
+    }, DELETE_CONFIRM_MS);
+    return;
+  }
+  delete button.dataset.confirm;
+  button.disabled = true;
+  button.textContent = '削除中…';
+  try {
+    const res = await apiFetch(`/api/assets/${encodeURIComponent(asset.id)}`, {
+      method: 'DELETE',
+    });
+    if (res.status === 401) {
+      lightbox.pswp?.close();
+      onUnauthorized();
+      return;
+    }
+    if (!res.ok && res.status !== 404) throw new Error(String(res.status));
+    // 404 = already gone (e.g. deleted by the organiser): drop it from the grid all the same.
+    lightbox.pswp?.close();
+    renderGrid(assets.filter((a) => a.id !== asset.id));
+    $('gallery-status').textContent = '削除しました';
+  } catch (err) {
+    if (err?.message !== 'closed') noteFor(asset, '削除できませんでした。もう一度お試しください');
+  } finally {
+    button.disabled = false;
+    button.textContent = '削除';
+  }
+}
+
 // Videos only stream while their slide is shown: neighbours that PhotoSwipe preloads get a
 // poster but no src, so they cannot use up the per-device video/original slots.
 function startVideo(content) {
@@ -368,6 +414,26 @@ function setupLightbox() {
       onClick: (_event, el, pswp) => onSave(el, pswp.currSlide.data.asset),
     });
     ui.registerElement({
+      name: 'gw-delete',
+      order: 8,
+      isButton: true,
+      tagName: 'button',
+      title: '削除',
+      html: '削除',
+      onInit: (el, pswp) => {
+        el.classList.add('gw-delete');
+        pswp.on('change', () => {
+          const asset = pswp.currSlide.data.asset;
+          el.hidden = !canDeleteAsset(asset);
+          if (el.dataset.confirm !== asset.id) {
+            delete el.dataset.confirm;
+            el.textContent = '削除';
+          }
+        });
+      },
+      onClick: (_event, el, pswp) => onDelete(el, pswp.currSlide.data.asset),
+    });
+    ui.registerElement({
       name: 'gw-caption',
       order: 9,
       isButton: false,
@@ -439,7 +505,14 @@ async function refresh(api, { force = false } = {}) {
  */
 export function initGallery(api, hooks) {
   onUnauthorized = hooks.onUnauthorized;
+  apiFetch = api;
   if (!lightbox) setupLightbox();
   $('gallery-refresh').onclick = () => refresh(api, { force: true });
-  return { show: () => refresh(api) };
+  return {
+    show: () => refresh(api),
+    /** @param {{ role: string, canDelete: boolean }} next from /api/session or after login */
+    setPermissions: (next) => {
+      permissions = next;
+    },
+  };
 }
