@@ -22,6 +22,13 @@ import { createTusServer } from './uploads.js';
 const APP_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const TUS_CLIENT_PATH = path.join(APP_ROOT, 'node_modules', 'tus-js-client', 'dist', 'tus.min.js');
+const PHOTOSWIPE_DIST = path.join(APP_ROOT, 'node_modules', 'photoswipe', 'dist');
+// Browser libraries served from node_modules (no CDN): fixed public name → file.
+const VENDOR_FILES = {
+  'photoswipe.esm.min.js': path.join(PHOTOSWIPE_DIST, 'photoswipe.esm.min.js'),
+  'photoswipe-lightbox.esm.min.js': path.join(PHOTOSWIPE_DIST, 'photoswipe-lightbox.esm.min.js'),
+  'photoswipe.css': path.join(PHOTOSWIPE_DIST, 'photoswipe.css'),
+};
 
 // Custom header required on every state-changing request. Cross-site forms cannot set it,
 // and a cross-origin fetch that sets it needs a CORS preflight we never answer.
@@ -297,6 +304,10 @@ export function createApp(config, { store, importer, immich } = {}) {
   });
 
   app.get('/vendor/tus.min.js', (_req, res) => res.sendFile(TUS_CLIENT_PATH));
+  app.get('/vendor/photoswipe/:file', (req, res, next) => {
+    if (!Object.hasOwn(VENDOR_FILES, req.params.file)) return next();
+    return res.sendFile(VENDOR_FILES[req.params.file]);
+  });
   app.use(express.static(PUBLIC_DIR, { index: 'index.html', maxAge: 0 }));
 
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));

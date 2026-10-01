@@ -5,6 +5,8 @@
 
 /* global tus */
 
+import { initGallery } from './gallery.js';
+
 const CSRF_HEADERS = { 'X-Requested-With': 'guest-gateway' };
 const CHUNK_SIZE = 50 * 1024 * 1024;
 const RETRY_DELAYS = [0, 1000, 3000, 5000, 10000, 20000, 30000];
@@ -20,6 +22,9 @@ let wakeLock = null;
 // True when the server imports into Immich (false in the speed-test mode).
 let importing = false;
 let pollTimer = null;
+// Set once the server reports the gallery (import mode).
+let galleryEnabled = false;
+let gallery = null;
 
 function formatBytes(bytes) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
@@ -112,6 +117,23 @@ function updateSummary() {
     (adding ? `(アルバムに追加中 ${adding} 件)` : '') +
     (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '') +
     (rejected ? `(受付不可 ${rejected} 件)` : '');
+}
+
+function showTab(name) {
+  $('upload-pane').hidden = name !== 'upload';
+  $('gallery').hidden = name !== 'gallery';
+  $('tab-upload').setAttribute('aria-pressed', String(name === 'upload'));
+  $('tab-gallery').setAttribute('aria-pressed', String(name === 'gallery'));
+  if (name === 'gallery') {
+    gallery ??= initGallery(api);
+    gallery.show();
+  }
+}
+
+function enterApp() {
+  show('uploader');
+  $('tabs').hidden = !galleryEnabled;
+  showTab('upload');
 }
 
 function setGreeting(nickname) {
@@ -368,12 +390,19 @@ async function loadDiagnostics() {
 
 async function init() {
   const res = await api('/api/session');
-  const { authenticated, nickname, closesAt, importing: importEnabled } = await res.json();
+  const {
+    authenticated,
+    nickname,
+    closesAt,
+    importing: importEnabled,
+    gallery: galleryOn,
+  } = await res.json();
   importing = Boolean(importEnabled);
+  galleryEnabled = Boolean(galleryOn);
   $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
   if (authenticated) {
     setGreeting(nickname);
-    show('uploader');
+    enterApp();
     loadDiagnostics();
   } else {
     $('nickname').value = recallNickname();
@@ -400,7 +429,7 @@ async function submitLogin() {
     const nickname = $('nickname').value.trim();
     rememberNickname(nickname);
     setGreeting(nickname);
-    show('uploader');
+    enterApp();
     loadDiagnostics();
     settleOrphanedImports();
     requeueFailed('待機中(再ログイン後に再開)');
@@ -434,6 +463,9 @@ $('login-form').addEventListener('submit', async (event) => {
     button.disabled = false;
   }
 });
+
+$('tab-upload').addEventListener('click', () => showTab('upload'));
+$('tab-gallery').addEventListener('click', () => showTab('gallery'));
 
 $('files').addEventListener('change', (event) => {
   addFiles(event.target.files);
