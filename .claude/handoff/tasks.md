@@ -197,6 +197,21 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    Upload the same photo again → 「同じ写真が既にアルバムにあります」.
    Open 「みんなの写真」: view, play the video, save a photo (share sheet → Photos), delete the test
    photo (own upload); with the organiser password, delete the test video.
+   **Bulk save** (「まとめて保存」; needs ~40 items incl. 2–3 videos in the album, one ≥ 600 MB if possible):
+   - iPhone (Safari): 「準備する」 → 「写真アプリに保存」 → share sheet shows 「〇項目を保存」 (photo-only:
+     「〇枚の画像を保存」) → items appear in Photos (videos too); the second batch follows; a video
+     > 200 MB is listed below with a 「保存」 button → Files app → share → 「ビデオを保存」.
+     Note whether Safari reloads/crashes while preparing (memory) and the exact sheet labels.
+   - 「やめる」 mid-run, reload, 「準備する」 again → continues with the rest; the 自分が送ったものは除く
+     toggle changes the count; 「保存済みの記録を消す」 resets it.
+   - iPhone save of a single video from the viewer → Photos.
+   - Android (Chrome): 「ダウンロードを始める」 → allow multiple downloads → files show in the gallery /
+     Google Photos 「Download」 folder. Also what happens if the multi-download prompt is dismissed.
+     With a ≥ 600 MB video: it is listed for one-by-one saving.
+   - Android via the LINE link: the panel says to open in Chrome.
+   - PC: 「ZIP を作成」 → download → the ZIP opens and holds the album. If the album is > 2 GB, open a
+     third part while two download → 「混み合っています」 page. Time a 2 GB part over the venue-like
+     network (download speed over Funnel was not part of T3).
 6. Leave it running or stop it as the user prefers (kill switch: `docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

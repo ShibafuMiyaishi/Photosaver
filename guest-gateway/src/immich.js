@@ -19,6 +19,7 @@ export const MEDIA_KINDS = Object.keys(MEDIA_PATHS);
 const RANGE = /^bytes=(?:\d{1,15}-\d{0,15}|-\d{1,15})$/;
 // Statuses relayed to the guest; 416 keeps Content-Range so players can recover.
 const MEDIA_STATUSES = new Set([200, 206, 416]);
+const ARCHIVE_STATUSES = new Set([200]);
 
 export class ImmichError extends Error {
   /**
@@ -108,6 +109,47 @@ export function createImmichClient({
     } catch {
       throw new ImmichError(op, res.status);
     }
+  }
+
+  /**
+   * Open a long-running download through the share link. Only the wait for response headers is
+   * time-limited; the body may stream for as long as the guest keeps reading (abort via `signal`).
+   * Resolves with the upstream Response when its status is in `statuses`.
+   */
+  async function openStream(op, path, { method = 'GET', headers = {}, json, signal, statuses }) {
+    if (!shareKey || signal?.aborted) throw new ImmichError(op, 0);
+    const allHeaders = {
+      ...headers,
+      'x-immich-share-key': shareKey,
+      // Photos and videos do not compress: never let Immich spend CPU gzipping them.
+      'accept-encoding': 'identity',
+    };
+    if (json !== undefined) allHeaders['content-type'] = 'application/json';
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const headerTimer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetchImpl(new URL(path, root), {
+        method,
+        headers: allHeaders,
+        body: json !== undefined ? JSON.stringify(json) : undefined,
+        signal: controller.signal,
+        redirect: 'error',
+      });
+    } catch {
+      signal?.removeEventListener('abort', onAbort);
+      throw new ImmichError(op, 0);
+    } finally {
+      clearTimeout(headerTimer);
+    }
+    if (!statuses.has(res.status)) {
+      signal?.removeEventListener('abort', onAbort);
+      await res.body?.cancel().catch(() => {});
+      throw new ImmichError(op, res.status);
+    }
+    return res;
   }
 
   return {
@@ -206,8 +248,7 @@ export function createImmichClient({
      */
     async fetchMedia({ kind, id, range, signal }) {
       if (!Object.hasOwn(MEDIA_PATHS, kind) || !isUuid(id)) throw new ImmichError('media', 0);
-      if (!shareKey) throw new ImmichError('media', 0);
-      const headers = { 'x-immich-share-key': shareKey };
+      const headers = {};
       if (
         (kind === 'video' || kind === 'original') &&
         typeof range === 'string' &&
@@ -215,29 +256,52 @@ export function createImmichClient({
       ) {
         headers.range = range;
       }
-      const controller = new AbortController();
-      const onAbort = () => controller.abort();
-      signal?.addEventListener('abort', onAbort, { once: true });
-      const headerTimer = setTimeout(() => controller.abort(), timeoutMs);
-      let res;
-      try {
-        res = await fetchImpl(new URL(MEDIA_PATHS[kind](id), root), {
-          headers,
-          signal: controller.signal,
-          redirect: 'error',
-        });
-      } catch {
-        signal?.removeEventListener('abort', onAbort);
-        throw new ImmichError('media', 0);
-      } finally {
-        clearTimeout(headerTimer);
+      return openStream('media', MEDIA_PATHS[kind](id), {
+        headers,
+        signal,
+        statuses: MEDIA_STATUSES,
+      });
+    },
+
+    /**
+     * How Immich would split the album into ZIP archives of about `archiveSize` bytes each
+     * (trashed assets are left out; live photos bring their motion part along).
+     * @param {{ albumId: string, archiveSize: number }} query
+     * @returns {Promise<{ totalSize: number, archives: { size: number, assetIds: string[] }[] }>}
+     */
+    async downloadInfo({ albumId, archiveSize }) {
+      if (!isUuid(albumId)) throw new ImmichError('download_info', 0);
+      const res = await request('download_info', 'download/info', {
+        method: 'POST',
+        auth: 'share',
+        json: { albumId, archiveSize },
+      });
+      const data = await readJson('download_info', res);
+      if (!Array.isArray(data?.archives)) throw new ImmichError('download_info', res.status);
+      const archives = data.archives.map((archive) => ({
+        size: Number(archive?.size) || 0,
+        assetIds: (Array.isArray(archive?.assetIds) ? archive.assetIds : []).filter(isUuid),
+      }));
+      const kept = archives.filter((archive) => archive.assetIds.length > 0);
+      return { totalSize: kept.reduce((sum, archive) => sum + archive.size, 0), archives: kept };
+    },
+
+    /**
+     * Open a ZIP stream (store-only, built on the fly by Immich) of these assets. Immich rejects
+     * the whole request with 400 if any id is not readable through the link (e.g. trashed).
+     * Like fetchMedia, only the wait for headers is time-limited.
+     * @param {{ assetIds: string[], signal?: AbortSignal }} request
+     */
+    async downloadArchive({ assetIds, signal }) {
+      if (!Array.isArray(assetIds) || assetIds.length === 0 || !assetIds.every(isUuid)) {
+        throw new ImmichError('archive', 0);
       }
-      if (!MEDIA_STATUSES.has(res.status)) {
-        signal?.removeEventListener('abort', onAbort);
-        await res.body?.cancel().catch(() => {});
-        throw new ImmichError('media', res.status);
-      }
-      return res;
+      return openStream('archive', 'download/archive', {
+        method: 'POST',
+        json: { assetIds },
+        signal,
+        statuses: ARCHIVE_STATUSES,
+      });
     },
 
     /**

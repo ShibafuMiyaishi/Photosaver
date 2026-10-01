@@ -66,8 +66,43 @@
           <div class="gallery-bar">
             <span id="gallery-count"></span>
             <span id="gallery-status" role="status"></span>
+            <button
+              id="gallery-bulk"
+              type="button"
+              class="small"
+              aria-controls="bulk"
+              aria-expanded="false"
+            >
+              まとめて保存
+            </button>
             <button id="gallery-refresh" type="button" class="small">更新</button>
           </div>
+
+          <section id="bulk" class="bulk" hidden>
+            <h2>まとめて保存</h2>
+            <p id="bulk-lead"></p>
+            <div id="bulk-phone">
+              <label class="check">
+                <input id="bulk-exclude-mine" type="checkbox" checked />
+                自分が送ったものは除く
+              </label>
+              <p id="bulk-count" class="muted"></p>
+            </div>
+            <div class="bulk-actions">
+              <button id="bulk-start" type="button">準備する</button>
+              <button id="bulk-stop" type="button" class="small" hidden>やめる</button>
+            </div>
+            <p id="bulk-progress" class="muted"></p>
+            <p id="bulk-status" class="bulk-status" role="status"></p>
+            <ul id="bulk-large" class="bulk-list" hidden></ul>
+            <ul id="bulk-zip" class="bulk-list" hidden></ul>
+            <p class="bulk-foot">
+              <button id="bulk-zip-other" type="button" class="link">
+                ZIP でまとめてダウンロード(パソコン向け)
+              </button>
+              <button id="bulk-reset" type="button" class="link">保存済みの記録を消す</button>
+            </p>
+          </section>
           <p id="gallery-empty" class="muted" hidden>まだ写真がありません。</p>
           <div id="grid" class="grid"></div>
           <p id="viewer-note" class="viewer-note" role="status"></p>
