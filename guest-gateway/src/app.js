@@ -24,6 +24,8 @@ export const CSRF_VALUE = 'guest-gateway';
 const TUS_ROUTE = /^\/files(?:\/[A-Za-z0-9_-]+)?\/?$/;
 const TUS_METHODS = new Set(['POST', 'PATCH', 'HEAD']);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// A login body is tiny; a client that has not sent it by then is stalling on purpose.
+const LOGIN_BODY_TIMEOUT_MS = 10_000;
 
 const CLOSED_HTML = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -148,15 +150,51 @@ export function createApp(config) {
   });
 
   const parseLoginBody = express.json({ limit: '1kb' });
+  const loginBodyTimeoutMs = config.loginBodyTimeoutMs ?? LOGIN_BODY_TIMEOUT_MS;
+  // Resolves true once the body is parsed, false if the deadline passes first; parser errors
+  // reject. The parser may still call back after the deadline (when the socket is torn down),
+  // so `settled` turns that late call into a no-op instead of a second outcome.
   const parseBody = (req, res) =>
     new Promise((resolve, reject) => {
-      parseLoginBody(req, res, (err) => (err ? reject(err) : resolve()));
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        resolve(false);
+      }, loginBodyTimeoutMs);
+      parseLoginBody(req, res, (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve(true);
+      });
     });
 
   app.post('/api/login', loginLimiter, async (req, res) => {
-    // Reserve the attempt synchronously, before any await: the lock check and the in-flight
-    // mark happen atomically, so parallel requests cannot all slip past the lockout while
-    // scrypt runs. Rejected clients never reach the body parser or scrypt.
+    // Cheap status check (reserves nothing): locked or paused clients are turned away before
+    // they can send a body.
+    const status = lockout.check(req.ip);
+    if (!status.allowed) {
+      res.set('Retry-After', String(Math.ceil(status.retryAfterMs / 1000)));
+      return res.status(429).json({ error: 'too_many_attempts' });
+    }
+    // No attempt slot is held while the body arrives, so stalled bodies cannot starve the
+    // limited slots; the deadline frees the parser and the connection.
+    // Body-parser errors propagate to the error handler (Express 5 forwards rejections).
+    if (!(await parseBody(req, res))) {
+      log('warn', 'login_body_timeout', { ip: req.ip });
+      if (res.headersSent) return req.destroy();
+      res.set('Connection', 'close');
+      res.once('finish', () => req.destroy());
+      return res.status(408).json({ error: 'timeout' });
+    }
+    const password = req.body?.password;
+    if (typeof password !== 'string' || password.length === 0 || password.length > 256) {
+      return res.status(400).json({ error: 'bad_request' });
+    }
+    // Reserve the attempt synchronously and start scrypt with no await in between: the lock
+    // check and the in-flight mark happen atomically, so parallel requests cannot all slip past
+    // the lockout while scrypt runs, and a slot is only ever held for one password check.
     const attempt = lockout.beginAttempt(req.ip);
     if (!attempt.ok) {
       res.set('Retry-After', String(attempt.retryAfterSec));
@@ -164,12 +202,6 @@ export function createApp(config) {
       return res.status(429).json({ error });
     }
     try {
-      // Body-parser errors propagate to the error handler (Express 5 forwards rejections).
-      await parseBody(req, res);
-      const password = req.body?.password;
-      if (typeof password !== 'string' || password.length === 0 || password.length > 256) {
-        return res.status(400).json({ error: 'bad_request' });
-      }
       if (!(await verifyPassword(password, config.guestPasswordHash))) {
         log('warn', 'login_failed', { ip: req.ip });
         lockout.recordFailure(req.ip);

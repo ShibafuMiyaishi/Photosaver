@@ -3,7 +3,9 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import * as tus from 'tus-js-client';
 import { login, startServer, TMP_ROOT } from './helpers/server.js';
 
@@ -28,6 +30,24 @@ function tusUpload(baseUrl, cookie, data, filename) {
     });
     upload.start();
   });
+}
+
+// Login request that announces a 50-byte JSON body but never sends it.
+function stalledLogin(baseUrl) {
+  const { hostname, port } = new URL(baseUrl);
+  const req = http.request({
+    hostname,
+    port,
+    path: '/api/login',
+    method: 'POST',
+    agent: false,
+    headers: { 'Content-Type': 'application/json', 'Content-Length': '50', ...CSRF },
+  });
+  // Destroying a pending request emits an error; the tests only care about the server side.
+  req.on('error', () => {});
+  req.flushHeaders();
+  const response = new Promise((resolve) => req.on('response', resolve));
+  return { req, response };
 }
 
 describe('open gateway', () => {
@@ -116,6 +136,19 @@ describe('open gateway', () => {
     expect(correct.res.headers.get('set-cookie')).toBeNull();
   });
 
+  it('does not let stalled login bodies hold attempt slots', async () => {
+    const stalled = Array.from({ length: 9 }, () => stalledLogin(srv.baseUrl));
+    try {
+      // Let the server receive all nine sets of headers before the real login.
+      await delay(200);
+      const ok = await login(srv.baseUrl);
+      expect(ok.res.status).toBe(200);
+      expect(ok.cookie).not.toBe('');
+    } finally {
+      for (const { req } of stalled) req.destroy();
+    }
+  });
+
   it('ignores successful logins in the outer rate limit', { timeout: 30_000 }, async () => {
     for (let i = 0; i < 31; i += 1) {
       expect((await login(srv.baseUrl)).res.status).toBe(200);
@@ -157,6 +190,34 @@ describe('open gateway', () => {
     const { cookie } = await login(srv.baseUrl);
     const res = await fetch(`${srv.baseUrl}/api/whoami`, { headers: { Cookie: cookie } });
     expect(await res.json()).toMatchObject({ viaFunnel: false });
+  });
+});
+
+describe('login body deadline', () => {
+  let srv;
+  beforeEach(async () => {
+    srv = await startServer({ loginBodyTimeoutMs: 200 });
+  });
+  afterEach(async () => {
+    await srv.close();
+  });
+
+  it('answers a stalled body with 408 and closes the connection', async () => {
+    const { req, response } = stalledLogin(srv.baseUrl);
+    const closed = new Promise((resolve) => req.on('close', resolve));
+    try {
+      const res = await response;
+      expect(res.statusCode).toBe(408);
+      let body = '';
+      res.setEncoding('utf8');
+      for await (const chunk of res) body += chunk;
+      expect(JSON.parse(body)).toEqual({ error: 'timeout' });
+      await closed;
+    } finally {
+      req.destroy();
+    }
+    // A normal login still works afterwards.
+    expect((await login(srv.baseUrl)).res.status).toBe(200);
   });
 });
 
