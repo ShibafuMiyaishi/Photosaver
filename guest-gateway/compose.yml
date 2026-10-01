@@ -1,0 +1,61 @@
+# guest-gateway/compose.yml
+# ゲスト用アップロード窓口。ミニPC本体とは別の Tailscale ノード(tag:wedding-gw)として
+# Funnel で公開する。server/docker-compose.yml(Immich 本体)とは別プロジェクト。
+#
+# 起動(ミニPC、手順は guest-gateway/README.md):
+#   docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml \
+#     --env-file /srv/photosaver/guest-gateway/.env up -d --build
+# 緊急停止:
+#   docker compose -p wedding-gw down
+#   (ミニPC本体で tailscale funnel reset / serve reset は使わない — Immich の tailnet 公開も消える)
+#
+# 速度検証版のため Immich とはまだ接続しない。取り込みを実装する段階で、
+# ts サービスを external network `photosaver_default` に参加させる。
+
+name: wedding-gw
+
+services:
+  ts:
+    image: tailscale/tailscale:v1.102
+    container_name: guest_gateway_ts
+    hostname: ${TS_HOSTNAME:-guest-upload}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?TS_AUTHKEY is required}
+      TS_HOSTNAME: ${TS_HOSTNAME:-guest-upload}
+      TS_EXTRA_ARGS: --advertise-tags=tag:wedding-gw
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      # Userspace networking (the image default): the gateway cannot dial tailnet peers.
+      TS_USERSPACE: 'true'
+    volumes:
+      - ${GW_DATA_DIR:?GW_DATA_DIR is required}/ts-state:/var/lib/tailscale
+      # TS_SERVE_CONFIG must be mounted as a directory, not a single file.
+      - ./ts-config:/config:ro
+    restart: unless-stopped
+
+  guest-gateway:
+    build: .
+    container_name: guest_gateway
+    # Share the sidecar's network namespace; tailscale serve proxies to 127.0.0.1:8080.
+    network_mode: service:ts
+    depends_on:
+      - ts
+    environment:
+      HOST: 127.0.0.1
+      PORT: '8080'
+      STAGING_DIR: /data/staging
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      GUEST_PASSWORD_HASH: ${GUEST_PASSWORD_HASH:?GUEST_PASSWORD_HASH is required}
+      CLOSES_AT: ${CLOSES_AT:?CLOSES_AT is required}
+      MAX_FILE_GB: ${MAX_FILE_GB:-4}
+      MIN_FREE_GB: ${MIN_FREE_GB:-10}
+      KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
+    volumes:
+      # Photo HDD. create_host_path: false makes startup fail (instead of writing to the
+      # system disk) when the HDD is not mounted and the directory does not exist.
+      - type: bind
+        source: ${STAGING_DIR_HOST:?STAGING_DIR_HOST is required}
+        target: /data/staging
+        bind:
+          create_host_path: false
+    restart: unless-stopped
