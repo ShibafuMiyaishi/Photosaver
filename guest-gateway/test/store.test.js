@@ -66,4 +66,29 @@ describe('upload store', () => {
     ]);
     expect(store.statusForDevice('dev-1', [])).toEqual([]);
   });
+
+  it('maps assets to their first creating uploader and ownership', () => {
+    const asset = '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    store.add({ ...ROW, uploadId: 'first', deviceId: 'dev-2', nickname: 'はなこ' });
+    store.markImported('first', 'created', asset);
+    store.add({ ...ROW, uploadId: 'again' });
+    store.markImported('again', 'duplicate', asset);
+    store.add({ ...ROW, uploadId: 'pending' });
+
+    expect(store.uploaders([asset, 'unknown'])).toEqual(
+      new Map([[asset, { nickname: 'はなこ', deviceId: 'dev-2' }]]),
+    );
+    expect(store.uploaders([]).size).toBe(0);
+  });
+
+  it('looks up albums larger than one query chunk', () => {
+    const ids = Array.from({ length: 1201 }, (_, i) => `asset-${i}`);
+    ids.forEach((assetId, i) => {
+      store.add({ ...ROW, uploadId: `u${i}`, nickname: `n${i}` });
+      store.markImported(`u${i}`, 'created', assetId);
+    });
+    const found = store.uploaders(ids);
+    expect(found.size).toBe(1201);
+    expect(found.get('asset-1200').nickname).toBe('n1200');
+  });
 });

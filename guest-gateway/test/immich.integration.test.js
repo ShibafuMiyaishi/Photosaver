@@ -80,7 +80,9 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
       filePath: files.a,
       filename: 'IMG_A.png',
       mime: 'image/png',
-      lastModified: Date.now(),
+      // An hour older than B: Immich pages by capture time (whole seconds) with offset cursors,
+      // so equal timestamps would make the page order unstable.
+      lastModified: Date.now() - 3_600_000,
     });
     expect(first.status).toBe('created');
     const again = await client.uploadAsset({
@@ -140,6 +142,25 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
       store.close();
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('relays album media and refuses assets outside the album', async () => {
+    const page = await client.listAlbumAssets({ albumId: event.albumId });
+    const [asset] = page.items;
+    // Thumbnails are generated asynchronously: a fresh upload answers 404 for a moment.
+    const thumb = await waitFor(() =>
+      client.fetchMedia({ kind: 'thumbnail', id: asset.id }).catch(() => null),
+    );
+    expect(thumb.headers.get('content-type')).toMatch(/^image\//);
+    await thumb.body.cancel();
+    const part = await client.fetchMedia({ kind: 'original', id: asset.id, range: 'bytes=0-3' });
+    expect(part.status).toBe(206);
+    expect((await part.arrayBuffer()).byteLength).toBe(4);
+    const err = await client
+      .fetchMedia({ kind: 'original', id: '00000000-0000-4000-8000-000000000000' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBeGreaterThanOrEqual(400);
   });
 
   it('deletes with the delete-only API key', async () => {

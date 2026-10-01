@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 // pending: waiting for / retrying the Immich upload. created / duplicate: in the album.
 // failed: given up (the staged file is gone).
 export const STATUSES = ['pending', 'created', 'duplicate', 'failed'];
+const UPLOADER_CHUNK = 500;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS uploads (
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS uploads (
 );
 CREATE INDEX IF NOT EXISTS uploads_device ON uploads (device_id, created_at);
 CREATE INDEX IF NOT EXISTS uploads_status ON uploads (status);
+CREATE INDEX IF NOT EXISTS uploads_asset ON uploads (asset_id);
 `;
 
 /**
@@ -57,6 +59,16 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const byDevice = db.prepare(`
     SELECT upload_id, filename, status, created_at FROM uploads
     WHERE device_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`);
+  // Uploader per asset: the first guest whose upload created it (duplicates point to the same
+  // asset but do not make it theirs).
+  const uploaderSql = (count) => `
+      SELECT asset_id, nickname, device_id FROM uploads
+      WHERE status = 'created' AND asset_id IN (${Array(count).fill('?').join(', ')})
+      ORDER BY created_at, rowid`;
+  // Full chunks reuse one prepared statement; only the last, shorter chunk is prepared ad hoc.
+  const uploaderFullChunk = db.prepare(uploaderSql(UPLOADER_CHUNK));
+  const uploaderOf = (count) =>
+    count === UPLOADER_CHUNK ? uploaderFullChunk : db.prepare(uploaderSql(count));
   const pending = db.prepare(
     "SELECT * FROM uploads WHERE status = 'pending' ORDER BY created_at, rowid",
   );
@@ -115,6 +127,23 @@ export function openStore(dbPath, { now = Date.now } = {}) {
       return byDeviceAndIds(uploadIds.length)
         .all(deviceId, ...uploadIds)
         .map((r) => ({ id: r.upload_id, filename: r.filename, status: r.status }));
+    },
+
+    /**
+     * Who uploaded these assets through the gateway: Map assetId → { nickname, deviceId }.
+     * Assets added another way (e.g. the Immich app) are absent.
+     */
+    uploaders(assetIds) {
+      const result = new Map();
+      // Chunked: a whole album can hold thousands of ids.
+      for (let i = 0; i < assetIds.length; i += UPLOADER_CHUNK) {
+        const chunk = assetIds.slice(i, i + UPLOADER_CHUNK);
+        for (const row of uploaderOf(chunk.length).all(...chunk)) {
+          if (result.has(row.asset_id)) continue;
+          result.set(row.asset_id, { nickname: row.nickname, deviceId: row.device_id });
+        }
+      }
+      return result;
     },
 
     /** Rows still waiting for Immich, oldest first (resumed after a restart). */

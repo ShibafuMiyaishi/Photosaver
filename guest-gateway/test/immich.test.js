@@ -216,4 +216,110 @@ describe('createImmichClient', () => {
     expect(err).toBeInstanceOf(ImmichError);
     expect(err.status).toBe(0);
   });
+
+  it('fetches media by kind with the share key and forwards valid ranges only for video/original', async () => {
+    fake = await startFake((_req, res) => {
+      res.writeHead(206, { 'content-type': 'video/mp4', 'content-range': 'bytes 0-1/10' });
+      res.end('ok');
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'share-key' });
+    const res = await client.fetchMedia({ kind: 'video', id: ASSET, range: 'bytes=0-1' });
+    expect(res.status).toBe(206);
+    expect(await res.text()).toBe('ok');
+    await client.fetchMedia({ kind: 'thumbnail', id: ASSET, range: 'bytes=0-1' });
+    await client.fetchMedia({ kind: 'original', id: ASSET, range: 'bytes=0-1, 5-6' });
+    await client.fetchMedia({ kind: 'preview', id: ASSET });
+
+    expect(fake.requests.map((r) => [r.url, r.headers.range])).toEqual([
+      [`/api/assets/${ASSET}/video/playback`, 'bytes=0-1'],
+      [`/api/assets/${ASSET}/thumbnail?size=thumbnail`, undefined],
+      [`/api/assets/${ASSET}/original`, undefined],
+      [`/api/assets/${ASSET}/thumbnail?size=preview`, undefined],
+    ]);
+    expect(fake.requests.every((r) => r.headers['x-immich-share-key'] === 'share-key')).toBe(true);
+    expect(fake.requests.every((r) => r.headers.cookie === undefined)).toBe(true);
+  });
+
+  it('maps non-200/206 media responses to ImmichError without the body', async () => {
+    fake = await startFake((_req, res) => json(res, 400, { message: 'secret internal detail' }));
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    const err = await client.fetchMedia({ kind: 'original', id: ASSET }).catch((e) => e);
+    expect(err).toBeInstanceOf(ImmichError);
+    expect(err.status).toBe(400);
+    expect(err.message).not.toContain('secret');
+  });
+
+  it('limits only the wait for media headers, not the body transfer', async () => {
+    fake = await startFake((req, res) => {
+      if (req.url.includes('thumbnail')) return setTimeout(() => res.end('late'), 200);
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.write('a');
+      return setTimeout(() => res.end('b'), 200);
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k', timeoutMs: 50 });
+    const slowHeaders = await client.fetchMedia({ kind: 'thumbnail', id: ASSET }).catch((e) => e);
+    expect(slowHeaders).toBeInstanceOf(ImmichError);
+    const slowBody = await client.fetchMedia({ kind: 'original', id: ASSET });
+    expect(await slowBody.text()).toBe('ab');
+  });
+
+  it('aborts a media transfer when the caller signal fires', async () => {
+    fake = await startFake((_req, res) => {
+      res.writeHead(200, { 'content-type': 'video/mp4' });
+      res.write('first');
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    const controller = new AbortController();
+    const res = await client.fetchMedia({ kind: 'video', id: ASSET, signal: controller.signal });
+    const reading = res.text();
+    controller.abort();
+    await expect(reading).rejects.toThrow();
+  });
+
+  it('refuses unknown media kinds and non-UUID ids without calling Immich', async () => {
+    fake = await startFake((_req, res) => res.end());
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    for (const request of [
+      { kind: 'fullsize', id: ASSET },
+      { kind: '__proto__', id: ASSET },
+      { kind: 'original', id: '../../server/config' },
+    ]) {
+      await expect(client.fetchMedia(request)).rejects.toBeInstanceOf(ImmichError);
+    }
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('forwards only well-formed single ranges and relays 416 with its Content-Range', async () => {
+    fake = await startFake((req, res) => {
+      if (req.headers.range === 'bytes=999-') {
+        res.writeHead(416, { 'content-range': 'bytes */10' });
+        return res.end();
+      }
+      return res.end('x');
+    });
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    for (const range of ['bytes=-', 'bytes=-500', 'bytes=0-', 'bytes=1-2-3']) {
+      await client.fetchMedia({ kind: 'original', id: ASSET, range });
+    }
+    expect(fake.requests.map((r) => r.headers.range)).toEqual([
+      undefined,
+      'bytes=-500',
+      'bytes=0-',
+      undefined,
+    ]);
+    const res = await client.fetchMedia({ kind: 'video', id: ASSET, range: 'bytes=999-' });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe('bytes */10');
+  });
+
+  it('lists in ascending order on request', async () => {
+    fake = await startFake((_req, res) =>
+      json(res, 200, { assets: { items: [], nextCursor: null } }),
+    );
+    const client = createImmichClient({ baseUrl: fake.baseUrl, shareKey: 'k' });
+    await client.listAlbumAssets({ albumId: ALBUM, direction: 'asc' });
+    await client.listAlbumAssets({ albumId: ALBUM, direction: 'sideways' });
+    const bodies = fake.requests.map((r) => JSON.parse(r.body).orderBy.direction);
+    expect(bodies).toEqual(['asc', 'desc']);
+  });
 });
