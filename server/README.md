@@ -6,12 +6,17 @@
 |---|---|
 | `docker-compose.yml` | Immich v3 スタック(mount-guard + QSV 有効、guest-gateway 用の内部ネットワーク `photosaver_gw`) |
 | `.env.example` | 環境変数テンプレート(コピーして `.env` を作る) |
-| `scripts/sync-db-dumps.sh` | DB ダンプを NVMe へミラーする cron 用スクリプト |
+| `scripts/sync-db-dumps.sh` | DB ダンプを NVMe へミラーする cron 用スクリプト(マーカーかダンプが無ければミラーに触れずエラー終了) |
 
 公式 compose からの変更点は `docker-compose.yml` 冒頭のコメントに番号付きで列挙している
 (127.0.0.1 バインド / mount-guard / QSV / `DB_STORAGE_TYPE` 未設定 / `photosaver_gw`)。
 mount-guard は `UPLOAD_LOCATION`(HDD 上の `immich-library`)直下のマーカーファイル
-`.photosaver.mount-ok` が無いと本体の起動を止める。
+`.photosaver.mount-ok` が無いと本体の起動を止める。ただし mount-guard が走るのは `docker compose up` の
+ときだけ(OS 起動時の自動再起動では走らない)なので、Docker を HDD マウント後に起動させる systemd drop-in も
+入れる(new-server-setup.md 手順 6)。
+
+公式との差分は上の 5 点のほか、番号を付けていない小さな違い(`name`、`IMMICH_VERSION` の既定値、
+`depends_on` の書式、Valkey の digest / healthcheck)をヘッダーに注記している。
 
 ## 使い方
 
