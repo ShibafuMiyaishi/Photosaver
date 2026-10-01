@@ -2,6 +2,7 @@
 // 環境変数の読み込みと起動時バリデーション。不正なら throw し、index.js が終了させる。
 // IMMICH_SHARE_KEY が空なら速度検証モード(受信のみ・Immich へは取り込まない)。
 
+import { parseScryptHash } from './auth.js';
 import { LOCKOUT_DEFAULTS } from './lockout.js';
 
 const GIB = 1024 ** 3;
@@ -35,6 +36,17 @@ function parsePositiveInteger(name, value, fallback) {
   const n = Number(value);
   if (!Number.isSafeInteger(n) || n <= 0) throw fail(`${name} must be a positive integer`);
   return n;
+}
+
+/**
+ * A malformed hash, or scrypt parameters outside the accepted range (auth.js), would make
+ * every login fail or exhaust memory: refuse to start instead.
+ */
+function checkScryptHash(name, value) {
+  const parsed = parseScryptHash(value);
+  if (parsed.error) {
+    throw fail(`${name} is not a usable scrypt hash: ${parsed.error} (scripts/hash-password.js)`);
+  }
 }
 
 /** Immich import settings, or null in speed-test mode (no share key). */
@@ -83,12 +95,14 @@ export function loadConfig(env = process.env) {
   if (!guestPasswordHash.startsWith('scrypt:')) {
     throw fail('GUEST_PASSWORD_HASH is missing or not a scrypt hash (scripts/hash-password.js)');
   }
+  checkScryptHash('GUEST_PASSWORD_HASH', guestPasswordHash);
 
   // Optional: the organiser's password; logging in with it enables deleting any asset.
   const adminPasswordHash = env.ADMIN_PASSWORD_HASH ?? '';
   if (adminPasswordHash !== '' && !adminPasswordHash.startsWith('scrypt:')) {
     throw fail('ADMIN_PASSWORD_HASH must be a scrypt hash (scripts/hash-password.js) or empty');
   }
+  if (adminPasswordHash !== '') checkScryptHash('ADMIN_PASSWORD_HASH', adminPasswordHash);
 
   const closesAt = Date.parse(env.CLOSES_AT ?? '');
   if (!Number.isFinite(closesAt)) {
@@ -125,7 +139,9 @@ export function loadConfig(env = process.env) {
     keepUploads: parseBool(env.KEEP_UPLOADS, false),
     immich: loadImmich(env),
     cookieSecure: parseBool(env.COOKIE_SECURE, true),
-    trustProxyHops: parsePositiveNumber('TRUST_PROXY_HOPS', env.TRUST_PROXY_HOPS, 1),
+    // Express treats a number as a hop count; a fraction or 0 would silently pick the wrong
+    // client address and break the per-address lockout.
+    trustProxyHops: parsePositiveInteger('TRUST_PROXY_HOPS', env.TRUST_PROXY_HOPS, 1),
     // Login lockout per client address (venue Wi-Fi shares one): wrong passwords within
     // 15 minutes before the first lock, and how long that lock lasts (it doubles on repeats).
     loginMaxFailures: parsePositiveInteger(

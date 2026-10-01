@@ -103,7 +103,7 @@ describe('deleting assets', () => {
     ctx = await setup();
     const { srv, immich } = ctx;
     const admin = await login(srv.baseUrl, ADMIN_PASSWORD, '幹事');
-    expect(await admin.res.json()).toEqual({ ok: true, role: 'admin' });
+    expect(await admin.res.json()).toEqual({ ok: true, role: 'admin', nickname: '幹事' });
     const session = await (
       await fetch(`${srv.baseUrl}/api/session`, { headers: { Cookie: admin.cookie } })
     ).json();

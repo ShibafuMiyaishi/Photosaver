@@ -103,6 +103,8 @@ describe('open gateway', () => {
     for (let i = 0; i < 5; i += 1) await login(srv.baseUrl, PASSWORD, '');
     const ok = await login(srv.baseUrl, PASSWORD, '  花子\u202E ');
     expect(ok.res.status).toBe(200);
+    // The response carries the server-normalized nickname the session holds.
+    expect(await ok.res.json()).toEqual({ ok: true, role: 'guest', nickname: '花子' });
     const session = await fetch(`${srv.baseUrl}/api/session`, { headers: { Cookie: ok.cookie } });
     expect(await session.json()).toMatchObject({
       authenticated: true,
