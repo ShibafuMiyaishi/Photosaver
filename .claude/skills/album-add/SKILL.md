@@ -1,8 +1,12 @@
 ---
 name: album-add
-description: Register a new password-protected album by adding a UUID + bcrypt-hashed password to album-passwords.json without breaking existing entries. Use when the user wants to lock a new album, "アルバムにパスワードをかける", or "album-passwords.json に追加".
+description: FROZEN Windows/album-guard env only, not for the v2 mini PC. Register a new password-protected album by adding a UUID + bcrypt-hashed password to album-passwords.json without breaking existing entries. Use when the user wants to lock a new album, "アルバムにパスワードをかける", or "album-passwords.json に追加".
 allowed-tools: Bash(node *), Bash(curl *), Read, Edit, Write, Glob
 ---
+
+> **FROZEN — old Windows + Docker Desktop + album-guard env only (Phase A/B, `immich/`).**
+> Not for the v2 mini PC (Ubuntu, `server/`, `/mnt/photo`) or guest-gateway. Before running,
+> tell the user this targets the frozen env and confirm they really mean it (see `CLAUDE.md`).
 
 Guide the user through adding a new protected album.
 
@@ -50,5 +54,5 @@ Guide the user through adding a new protected album.
 
 ## Reference
 
-- File spec: `@docs/password-management.md`
+- File spec: `@docs/legacy/password-management.md`
 - Config file path invariant: `@.claude/rules/secrets.md`

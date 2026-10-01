@@ -1,8 +1,9 @@
 # legacy/ — 旧設計(Phase A/B: Windows + album-guard 時代)の資料
 
 2026年8月の方針転換([architecture.md](../architecture.md) 参照)以前のドキュメント。
-**現在の運用には使わない**が、経緯の記録および `immich/`(旧 Windows スタック)と
-`album-guard/`(凍結した自作認証プロキシ)を動かす場合の参照用に保存している。
+**現在の運用には使わない**が、経緯の記録および `immich/`(旧 Windows スタック)・
+`scripts/`(旧環境の補助スクリプト)・`album-guard/`(凍結した自作認証プロキシ)を
+動かす場合の参照用に保存している。
 
 | ファイル | 内容 | 廃止理由 |
 |---|---|---|

@@ -2,6 +2,8 @@
 
 HPSS Phase 11 の **アルバム単位パスワード認証リバースプロキシ**。Immich の前段に置き、`/api/albums/:uuid*` への API アクセスを JWT で保護する。
 
+> **凍結(2026年8月)**: Immich v3 でアルバム内アセットの列挙が `POST /api/search/metadata` に移り、パス intercept 型の保護に構造的な抜けが生じたため開発を終了した。現行構成(v2)では使わない。バグ修正のみ(明示的な依頼があった場合)。経緯: [docs/architecture.md](../docs/architecture.md)
+
 ## ローカル開発
 
 ```bash
@@ -28,8 +30,8 @@ Immich コンテナなしで album-guard 単体を起動する場合:
 # 必須: 32 文字以上のランダム JWT secret
 export GUARD_JWT_SECRET=$(openssl rand -hex 32)
 
-# テスト用 fixture を指してもよい
-export GUARD_PASSWORDS_FILE="$(pwd)/test/fixtures/album-passwords.sample.json"
+# パスワード設定ファイル(未指定時は /app/data/album-passwords.json。見つからない場合は全アルバム通過モードで起動)
+export GUARD_PASSWORDS_FILE="$(pwd)/../tmp/album-passwords.json"
 
 # 起動(Immich 未接続なので /api/* は 502/503 を返す)
 npm start
@@ -75,7 +77,7 @@ album-guard/
 │     ├─ login.js        /album-guard/login HTML 生成
 │     └─ inject.js       /album-guard/inject.js スクリプト生成
 ├─ test/
-│  ├─ fixtures/          テスト用 album-passwords.sample.json
+│  ├─ fixtures/          テスト用パスワード設定(passwords.js が実行時に bcrypt ハッシュを生成)
 │  ├─ helpers/           Vitest setupFiles + tmp/ ヘルパー
 │  ├─ config.test.js
 │  ├─ auth.test.js

@@ -1,6 +1,7 @@
 # Tailscale リモートアクセス(Photosaver v2)
 
-外部公開の唯一の経路。ドメイン不要・ポート開放なし・無料。
+Immich への唯一のアクセス経路。ドメイン不要・ポート開放なし・無料。
+イベント時のゲスト用窓口(guest-gateway)だけは、別ノードから Funnel で期間限定公開する(下記)。
 
 ## 料金プランの前提(2026年8月確認)
 
@@ -53,7 +54,24 @@ ACL でさらに絞ることも可能だがデフォルトで十分。
   「写真が上がらない」の 9 割はこれ
 - 電池消費は実用上ほぼ気にならない(WireGuard はアイドルが軽い)
 
-## 将来の拡張: アプリを入れない人への共有
+## ゲスト用窓口ノード(guest-gateway、イベント時のみ)
+
+アカウントも Tailscale も持たないゲスト向けのアップロード窓口は、ミニ PC 本体とは**別の Tailscale ノード**
+(`tag:wedding-gw`)として Funnel で公開する。設計・手順の詳細は [guest-gateway.md](guest-gateway.md)。
+
+- 窓口は別 compose プロジェクト `wedding-gw` の ts サイドカー(`tailscale/tailscale` コンテナ)が
+  ノードとして tailnet に参加し、Funnel の HTTPS 終端を担う。ホストの serve 設定には触れない
+- 管理画面での準備: Access controls に `tagOwners`(`tag:wedding-gw`)と `nodeAttrs`(`funnel`)を追記し、
+  Tags `tag:wedding-gw` の認証キーを発行する(手順は [guest-gateway.md](guest-gateway.md) の準備手順 2)
+- Funnel は Tailscale 1.38.3 以上が必要(窓口のサイドカーは `tailscale/tailscale:v1.102`。ホスト側の版は `.claude/handoff/tasks.md` の T1 で確認)
+- Funnel の帯域上限は非公開のため、イベント前に実機で速度を測って採否を決める
+- 止めるときは `docker compose -p wedding-gw down`。イベント後は窓口ノードの削除・認証キーの失効・
+  `nodeAttrs` の funnel 行の削除まで行う
+
+> ⚠️ ミニ PC 本体で `tailscale funnel reset` / `tailscale serve reset` を実行しない。
+> Immich の tailnet 公開(443 → 127.0.0.1:2283)まで消える。
+
+## 将来の拡張: アプリを入れない人への閲覧共有
 
 「URL を送るだけで見せたい」需要が出たら、**Immich Public Proxy (IPP)** +
 **Tailscale Funnel** を追加する(Immich 本体は非公開のまま、読み取り専用の
@@ -63,11 +81,9 @@ IPP だけを公開する定石構成):
   (パスワード・期限付き)だけを外に出すステートレスなプロキシ。API キー不要
 - [Funnel](https://tailscale.com/kb/1223/funnel) は全プランで利用可。
   帯域制限あり(非公開値)のため単発のリンク共有向け
-- 現構成への追加はコンテナ 1 つ + `tailscale funnel` 1 コマンドで、既存部分の変更は不要
+- 現構成への追加はコンテナ 1 つ + Funnel の設定で、既存部分の変更は不要
 
-イベントで**ゲストにアップロードしてもらう**用途は、IPP ではなく自作の窓口で対応する
-(専用ノード `tag:wedding-gw` で Funnel 公開): [guest-gateway.md](guest-gateway.md)。
-⚠️ ミニPC本体で `tailscale funnel reset` / `serve reset` を実行すると Immich の tailnet 公開も消えるので使わない。
+ゲストに**アップロードしてもらう**用途は IPP では対応できない(読み取り専用)ため、上記の窓口で対応する。
 
 ## トラブルシューティング
 
@@ -75,5 +91,6 @@ IPP だけを公開する定石構成):
 |---|---|
 | 全員繋がらない | サーバーで `tailscale status`(logged out になっていないか)、`tailscale serve status` |
 | 特定の友達だけ繋がらない | 友達側の VPN オン確認 → 共有の承認状態(Machines → Shared with) → フル FQDN を使っているか |
-| 証明書エラー | 管理画面で HTTPS Certificates が有効か。`tailscale serve` を一度リセット(`sudo tailscale serve reset` → 再設定) |
+| 証明書エラー | 管理画面で HTTPS Certificates が有効か。`tailscale serve status` で設定を確認し、消えていれば上記「サーバー側の設定」のコマンドで再設定する(`serve reset` は使わない) |
 | 速度が遅い | `tailscale status` で相手との接続が direct か relay(DERP)か確認。relay ならルーターの NAT 設定(UPnP)を見直す |
+| ゲスト用窓口に外から届かない | [guest-gateway.md](guest-gateway.md) の「困ったとき」。ホストの serve / funnel 設定は触らない |

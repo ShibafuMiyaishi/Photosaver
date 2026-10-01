@@ -7,7 +7,7 @@
 #
 # セットアップ(cron、毎日 03:00):
 #   crontab -e
-#   0 3 * * * /srv/photosaver/scripts/sync-db-dumps.sh >> /var/log/photosaver-dbsync.log 2>&1
+#   0 3 * * * /srv/photosaver/scripts/sync-db-dumps.sh >> /var/tmp/photosaver-dbsync.log 2>&1
 
 set -euo pipefail
 

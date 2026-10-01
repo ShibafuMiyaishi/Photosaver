@@ -1,24 +1,31 @@
 ---
-description: JavaScript style conventions for album-guard and scripts
-paths: "album-guard/**/*.js, scripts/**/*.js, scripts/**/*.mjs"
+description: JavaScript style conventions for guest-gateway, album-guard (frozen) and scripts
+paths: "guest-gateway/**/*.js, album-guard/**/*.js, scripts/**/*.js, scripts/**/*.mjs"
 ---
 
-## Module system
+## Per component
 
-- **CommonJS only** in `album-guard/` (`require` / `module.exports`). Spec uses CJS.
-- **ES Modules** (`.mjs`) are OK in `scripts/` — single-file utilities, top-level
-  `await` is welcome there.
+| | guest-gateway (ACTIVE) | album-guard (FROZEN) | `scripts/` (legacy) |
+|---|---|---|---|
+| Runtime | Node 24 (`node:24-alpine`, CI Node 24) | Node 20 (`node:20-alpine`, CI Node 20) | Node 20 |
+| Modules | **ESM** (`"type": "module"`, `import`/`export`) | **CommonJS** (`require`/`module.exports`) | ESM `.mjs` |
+| Framework | Express 5 | Express 4 | — |
+| Logging | `log(level, event, fields)` from `src/log.js` (one JSON line) | `morgan` + `console.*` prefixed `[album-guard]` | `console.*` |
 
-## Formatting
+Do not convert album-guard to ESM, Express 5, or TypeScript (frozen: bugfix-only).
 
-- **Prettier defaults** + `semi: true`, `singleQuote: true`, `printWidth: 100`.
-- 2-space indent.
-- Trailing commas in multi-line objects/arrays (`trailingComma: 'all'`).
+## Formatting (identical `.prettierrc` in both components)
+
+- Prettier: `semi: true`, `singleQuote: true`, `printWidth: 100`, `trailingComma: 'all'`,
+  2-space indent, LF.
+- Run `npm run lint` (ESLint flat config) and `npm run format` in the component directory.
 
 ## Language level
 
-- Node 20 features OK (nullish coalescing, optional chaining, top-level await in `.mjs`).
-- No TypeScript. No Babel. No bundler.
+- Use what the component's Node version supports (guest-gateway: `import.meta.dirname`,
+  `node:sqlite`, `fs.openAsBlob`, global `fetch`/`FormData`).
+- No TypeScript. No Babel. No bundler. Browser code in `guest-gateway/public/` is plain JS
+  served as-is (libraries from `node_modules`, no CDN).
 
 ## Error handling
 
@@ -26,31 +33,24 @@ paths: "album-guard/**/*.js, scripts/**/*.js, scripts/**/*.mjs"
 - Prefer `async/await` over `.then()` chains.
 - `async` functions must either return or throw — never leave a promise unawaited
   unless explicitly fire-and-forget (and commented).
+- guest-gateway: never return Immich error bodies or internal URLs to clients
+  (see `.claude/rules/guest-gateway.md`).
 
 ## Imports
 
-- Top-of-file `require` calls, grouped: Node builtins → npm deps → local.
-- Treat `require(...)` return value as frozen — do not mutate imported modules.
-
-## Logging
-
-- HTTP logs: `morgan` (configured in `config.LOG_FORMAT`).
-- Application logs: `console.log` / `console.warn` / `console.error`.
-- Prefix all app-level logs with `[album-guard]` (per spec).
-- No `debug` or `winston` deps — keep it simple.
+- Top-of-file imports, grouped: Node builtins (`node:` prefix) → npm deps → local.
+- Do not mutate imported modules.
 
 ## Dependencies
 
-- Do NOT add new runtime deps beyond what the spec lists (`express`,
-  `http-proxy-middleware`, `jsonwebtoken`, `bcryptjs`, `morgan`, `dotenv`).
-- No `axios`, no `node-fetch`, no `lodash`. Use built-ins.
-- Test-only deps (Vitest) are fine.
+- guest-gateway: only the dependency set approved in `.claude/rules/guest-gateway.md`;
+  anything else needs user approval. Lockfile changes also need approval.
+- album-guard: no new deps, no upgrades (frozen).
+- No `axios`, `node-fetch`, `lodash`, `winston`, `debug` — use built-ins.
 
-## Spec fidelity
+## File conventions
 
-When adding new source files, match the spec's style:
-- File header one-liner comment with path (e.g., `// album-guard/src/foo.js`)
-- Top-level `require` calls
-- Functional exports via `module.exports = { fn1, fn2 }`
-- Japanese inline comments only where the user-facing message is Japanese
-  (e.g., log message strings). Code comments default to English.
+- First line: path comment (e.g. `// guest-gateway/src/foo.js`), then a short description
+  of the file's role (Japanese is used for these headers in guest-gateway).
+- Code comments default to English; Japanese for domain-specific context.
+  User-facing strings (UI, guest-visible messages) are Japanese.

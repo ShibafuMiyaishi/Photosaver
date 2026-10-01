@@ -1,8 +1,12 @@
 ---
 name: hash-password
-description: Generate a bcrypt hash (10 rounds) for a plaintext password so it can be pasted into album-passwords.json. Use this whenever the user needs to create or rotate an album password and asks for a hash, or mentions "パスワードハッシュ" / "bcrypt".
+description: FROZEN Windows/album-guard env only, not for the v2 mini PC. Generate a bcrypt hash (10 rounds) for a plaintext password so it can be pasted into album-passwords.json. Use this whenever the user needs to create or rotate an album password and asks for a hash, or mentions "パスワードハッシュ" / "bcrypt".
 allowed-tools: Bash(node *), Bash(npx *), Bash(curl *)
 ---
+
+> **FROZEN — old Windows + Docker Desktop + album-guard env only (Phase A/B, `immich/`).**
+> Not for the v2 mini PC (Ubuntu, `server/`, `/mnt/photo`) or guest-gateway. Before running,
+> tell the user this targets the frozen env and confirm they really mean it (see `CLAUDE.md`).
 
 Generate a bcrypt hash for the password `$ARGUMENTS` using 10 rounds (the project standard).
 
@@ -46,4 +50,4 @@ The hash goes into `E:\Photo\guard\album-passwords.json`:
 }
 ```
 
-See also: `@docs/password-management.md`.
+See also: `@docs/legacy/password-management.md`.

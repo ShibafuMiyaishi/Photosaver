@@ -19,7 +19,8 @@ name: photosaver
 
 services:
   # 写真 HDD が正しくマウントされている場合のみ本体を起動するガード。
-  # /mnt/photo(HDD)直下のマーカーファイルを確認する。HDD が外れていると
+  # ${UPLOAD_LOCATION}(HDD 上の immich-library)直下のマーカーファイル .photosaver.mount-ok を
+  # 確認する(/mnt/photo 直下のマーカーは guest-gateway 用で、別に必要)。HDD が外れていると
   # bind mount は「空のディレクトリ」を掴んで Immich が壊れたデータを書くため、
   # ここで fail-fast させる(旧 album-guard 不変条件 4 の後継)。
   mount-guard:

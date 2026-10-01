@@ -36,11 +36,14 @@ Run over SSH, read-only. Do not change anything in this task.
    Confirm 443 → `127.0.0.1:2283` is tailnet-only and nothing is funneled.
    **Do not paste the output into the report** (it contains the tailnet hostname).
 5. Storage: `findmnt /mnt/photo`, `df -h /mnt/photo /srv`.
-6. Mount marker — check BOTH paths and report which exist:
+6. Mount markers — check BOTH paths and report which exist:
    `ls -la /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok`.
-   (Known doc inconsistency: setup doc creates the marker at `/mnt/photo/`, but `mount-guard`
-   mounts `${UPLOAD_LOCATION}` and tests `/data/.photosaver.mount-ok`, i.e. inside
-   `immich-library/`. Just report; do not fix.)
+   Both are expected: `mount-guard` reads the one inside `immich-library/` (it mounts
+   `${UPLOAD_LOCATION}` and tests `/data/.photosaver.mount-ok`); the guest-gateway reads the
+   one at `/mnt/photo/`. If the `/mnt/photo/` one is missing while `findmnt /mnt/photo` shows
+   the HDD mounted, it may be created — only with the user's explicit OK (the one exception to
+   this task's read-only rule): `touch /mnt/photo/.photosaver.mount-ok`. Never create a marker
+   on an unmounted path. Report a missing `immich-library/` marker without fixing it.
 7. Host: `nproc`, `free -h`, `uptime`, `lsb_release -d`, and `id -u` of the SSH user
    (must be 1000: the gateway container runs as uid 1000 and its files are read by compose as
    this user; report if not).
@@ -103,8 +106,8 @@ Follow **`docs/operations.md` → 「compose 設定の反映」**:
 
 1. `git -C /srv/photosaver/repo pull --ff-only` (stop and report if dirty/diverged).
 2. Show the user `diff /srv/photosaver/docker-compose.yml /srv/photosaver/repo/server/docker-compose.yml`.
-   Expected: only the header comment item 5, the `networks:` block under `immich-server`, and the
-   top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
+   Expected: only the header comment item 5, the comment lines above `mount-guard` (comment-only),
+   the `networks:` block under `immich-server`, and the top-level `networks: gw`. If anything else differs (local edits on the server), STOP and ask.
 3. With approval: `cp` the file, `cd /srv/photosaver && docker compose up -d`, then
    `docker compose ps` (all healthy) and check that Immich works in the tailnet (open the app).
 4. Verify: `docker network inspect photosaver_gw --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}'`
@@ -125,9 +128,9 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
 1. `git -C /srv/photosaver/repo pull --ff-only` (report and stop if the clone is dirty or diverged).
 2. Directories: only if the HDD marker exists (`test -f /mnt/photo/.photosaver.mount-ok`) create
    `/srv/photosaver/guest-gateway/db` and `/mnt/photo/guest-gateway/staging` (both chown 1000:1000).
-   If the marker is missing, STOP and report (T1 item 6 notes a marker-location inconsistency;
-   the gateway expects `/mnt/photo/.photosaver.mount-ok` by default, override with
-   `MOUNT_MARKER_HOST` in `.env` only after confirming with the user).
+   If the marker is missing, STOP and report (see T1 item 6: the gateway reads
+   `/mnt/photo/.photosaver.mount-ok`; override `MOUNT_MARKER_HOST` in `.env` only after confirming
+   with the user).
 3. `.env`: T2 already created `/srv/photosaver/guest-gateway/.env` from `.env.example` with
    TS_AUTHKEY filled in. **Do not recreate or overwrite it** (the README's `install` line is guarded
    and skips an existing file). Fill in the remaining values in place: SESSION_SECRET
@@ -179,7 +182,7 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
 
 1. `git -C /srv/photosaver/repo pull --ff-only`, rebuild the image
    (`docker build -t guest-gateway /srv/photosaver/repo/guest-gateway`).
-2. Follow **`guest-gateway/README.md` → 「イベント用の Immich 準備(本番)」**: the user types the Immich
+2. Follow **`guest-gateway/README.md` → 「取り込みモードに切り替える」 → 「1. イベント用の Immich 準備」**: the user types the Immich
    admin password (`read -rs`), run `scripts/setup-event.js` on `--network photosaver_gw` with
    `--out /out/immich.env`. Verify only `ls -l /srv/photosaver/guest-gateway/immich.env` (mode 600)
    and `grep -c '^IMMICH_' /srv/photosaver/guest-gateway/immich.env` → 3. Never print the file.
@@ -187,7 +190,7 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    guest one; generate its hash like GUEST_PASSWORD_HASH (`docker run ... node scripts/hash-password.js`)
    and put it in `.env` as `ADMIN_PASSWORD_HASH=` (never echo it). Logging in with it enables deleting
    any photo.
-4. Follow **「取り込みモードに切り替える」**: recreate `guest-gateway`, check the log shows `immich_ok`
+4. Follow **「取り込みモードに切り替える」 → 「2. 窓口を作り直して確認」**: recreate `guest-gateway`, check the log shows `immich_ok`
    with version >= 3.2.4.
 5. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
    the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,

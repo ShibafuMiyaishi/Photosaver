@@ -1,89 +1,88 @@
 ---
 description: Test code and log files must live under the repo-relative tmp/ directory — never pollute source trees
-paths: "**/*.test.js, **/*.spec.js, **/test/**, **/tests/**, **/__tests__/**, scripts/**/*.mjs"
+paths: "**/*.test.js, **/*.spec.js, **/test/**, **/tests/**, **/__tests__/**, scripts/**/*.mjs, guest-gateway/scripts/**"
 ---
 
 ## `tmp/` workspace rule
 
-All ephemeral artifacts — test scratch files, test output, debug logs, Playwright
-traces, generated fixtures, anything temporary — must live under the repo-relative
-**`tmp/`** directory at the repo root:
+All ephemeral artifacts — test scratch files, test output, debug logs, browser screenshots,
+generated fixtures, verification scripts, anything temporary — must live under the
+**repo-relative `tmp/`** directory at the repo root (gitignored, never deployed).
 
-```
-C:\Users\fumiy\Desktop\code\Photosaver\tmp\
-```
+- In code, resolve it relative to the file, never from an absolute machine path
+  (e.g. `path.resolve(import.meta.dirname, '../../../tmp/...')` in ESM,
+  `path.resolve(__dirname, '..', '..', '..', 'tmp')` in CJS).
+- Do NOT use the OS temp directory (`/tmp`, `os.tmpdir()`, `%TEMP%`) for project artifacts.
+- Tests and verification code go in separate test files / `tmp/` scripts — never inside
+  production source files.
 
-(In code: `./tmp/` or `path.resolve(__dirname, '../../tmp')`.)
-
-### NOT the system `/tmp`
-
-Do NOT use the OS temp directory (`/tmp` on Linux, `%TEMP%` on Windows) for project
-test artifacts. Use the repo-scoped `./tmp/` instead, so artifacts stay discoverable
-and cleanable next to the code that produced them.
-
-### Subdivide by purpose
+### Current layout
 
 ```
 tmp/
-├─ logs/          アプリケーション/テストのログ
-├─ fixtures/      テスト用に生成した入力データ
-├─ test-output/   テスト結果のキャプチャ / カバレッジ生データ
-└─ e2e/           Playwright のトレース・スクリーンショット
+├─ test-output/
+│  └─ guest-gateway/   guest-gateway test output (TMP_ROOT in test/helpers/server.js)
+├─ test/               album-guard test fixtures (test/helpers/tmp.js)
+├─ e2e*/               Playwright MCP screenshots / traces
+├─ dev-immich/         dev Immich photo library (guest-gateway/dev/compose.yml)
+└─ <other>/           verification scripts, logs, review patches, ...
 ```
 
-Create subdirectories on demand (`fs.mkdirSync(dir, { recursive: true })`).
+Create subdirectories on demand (`fs.mkdir(dir, { recursive: true })`).
+
+## Component specifics
+
+- **guest-gateway**: every test that writes files imports `TMP_ROOT` from
+  `test/helpers/server.js` (`tmp/test-output/guest-gateway`) and writes only below it
+  (staging dirs, sqlite files, fixtures). `npm test` runs the unit tests; the Immich
+  integration tests (`test/immich.integration.test.js`) run only when `IMMICH_IT_URL`
+  (+ `IMMICH_IT_ADMIN_EMAIL` / `IMMICH_IT_ADMIN_PASSWORD`) point at the dev Immich —
+  never at the production server.
+- **album-guard** (FROZEN): `test/helpers/tmp.js` provides `mktmp()` under `tmp/`.
+- **Playwright MCP**: save screenshots/traces under `tmp/e2e/` (or another `tmp/e2e-*`
+  dir); `.playwright-mcp/` at the repo root is gitignored as a fallback only.
 
 ## Why
 
-1. **本番コードを汚さない** — `album-guard/src/` や `scripts/` にテスト副産物が残らない
-2. **ログ管理が楽** — 1 箇所見れば全部ある、`rm -rf tmp/*` で一掃できる
-3. **git に巻き込まない** — `.gitignore` で `tmp/` を丸ごと除外 → ログを誤コミットする事故を防止
-4. **CI との互換** — ローカルと CI で同じパス構造にできる
+1. **Clean source trees** — no test by-products in `src/` or `scripts/`
+2. **Easy log handling** — everything in one place; `rm -rf tmp/<dir>` clears it
+3. **Never committed** — `.gitignore` excludes all of `tmp/`
+4. **CI parity** — the same relative layout locally and in CI
 
-## Enforcement
+## Examples
 
-- **`.gitignore`** に `tmp/` を登録済(プロジェクト直下)。
-- **テストコード**はログ/フィクスチャを `./tmp/...` 配下にのみ書き出すこと。
-- **Playwright** は `outputDir`, `traceDir` を `./tmp/e2e/` に設定すること。
-- **Vitest** は `reporters` の file 出力を `./tmp/test-output/` に向けること。
-
-## 具体例
-
-✅ 正しい:
+✅ Good:
 
 ```js
-// album-guard/test/auth.test.js
-import fs from 'node:fs';
+// guest-gateway/test/foo.test.js
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
-import { describe, it, beforeAll } from 'vitest';
+import { TMP_ROOT } from './helpers/server.js';
 
-const TMP = path.resolve(__dirname, '../../tmp/test-output');
-
-beforeAll(() => {
-  fs.mkdirSync(TMP, { recursive: true });
-});
-
-it('writes debug log to tmp', () => {
-  fs.writeFileSync(path.join(TMP, 'auth-debug.json'), JSON.stringify({...}));
+it('writes a scratch file under tmp/', async () => {
+  await fs.mkdir(TMP_ROOT, { recursive: true });
+  await fs.writeFile(path.join(TMP_ROOT, `foo-${crypto.randomUUID()}.json`), '{}');
 });
 ```
 
-❌ 避ける:
+❌ Avoid:
 
 ```js
-fs.writeFileSync('/tmp/my-log.json', ...);              // OS system /tmp
-fs.writeFileSync('./src/test-output.json', ...);        // 本番ソースを汚染
-fs.writeFileSync('./album-guard/debug.log', ...);       // ソースツリーを汚染
-fs.writeFileSync(os.tmpdir() + '/x.log', ...);          // repo 外
+fs.writeFileSync('/tmp/my-log.json', ...);              // OS /tmp
+fs.writeFileSync(os.tmpdir() + '/x.log', ...);          // outside the repo
+fs.writeFileSync('./src/test-output.json', ...);        // pollutes the source tree
+fs.writeFileSync('/Users/<me>/.../tmp/x.log', ...);     // absolute path (breaks on another machine)
 ```
 
 ## Cleanup
 
-- ローカルで再現する時は `rm -rf tmp` で一掃してから実行
-- CI では毎回クリーンチェックアウトなので cleanup 不要(念のため artifact アップロード時に `tmp/e2e/` だけ保存)
-- サブディレクトリが見つからない場合、コード側で `mkdirSync(..., { recursive: true })` して自動作成
+- `tmp/dev-immich/` holds the dev Immich library: stop the dev compose before deleting it
+  (its Postgres lives in the `dev-pgdata` volume, so deleting `tmp/` does not reset the DB).
+- Any other subdirectory may be deleted freely; tests recreate what they need with
+  `mkdir(..., { recursive: true })`.
 
 ## When you see test or log code NOT following this convention
 
-Refactor it as part of the current change. Do not leave mixed conventions in the tree —
-inconsistency is worse than either rule alone.
+Refactor it as part of the current change (frozen components: only when that code is
+touched for a requested bugfix). Do not leave mixed conventions in the tree.

@@ -1,8 +1,8 @@
 # ゲスト用アップロード窓口(guest-gateway)
 
-> **状態: 開発中(2026-10)**。最初の利用は友達の結婚式。現在はアップロード → アルバムへの取り込み、
-> 「みんなの写真」での閲覧・保存・まとめて保存、削除(自分の投稿のみ・管理者は全件)、当日の手順書まで用意済み(実機での確認は自宅PCで実施)。コードと手順: [guest-gateway/](../guest-gateway/README.md)
-> 本ページは設計と運用手順のまとめ。実装の詳細ルールは `.claude/rules/guest-gateway.md`。
+> **状態(2026-10)**: 機能は実装済み(アップロード・取り込み・閲覧・保存・まとめて保存・削除・期限での自動終了)。
+> 残りはミニPCへのデプロイ、Funnel の速度計測、スマホ実機での確認(下の「準備手順」)。最初の利用は友達の結婚式。
+> コードとデプロイ手順: [guest-gateway/README.md](../guest-gateway/README.md)。実装の詳細ルール: `.claude/rules/guest-gateway.md`。
 
 ## 何をするものか
 
@@ -76,8 +76,10 @@ Immich のアカウントも Tailscale も持っていない**イベントのゲ
 
 ### 1. 事前確認(読み取りのみ)
 
-Immich のバージョン、docker ネットワーク(`photosaver_gw` が反映済みか)、Tailscale のバージョン、
-HDD の空き、マウント確認用マーカーの位置を確認する。詳細は `tasks.md` の T1。
+Immich のバージョン(3.2.4 以上)、docker ネットワーク(`photosaver_gw` が反映済みか)、Tailscale のバージョン、
+HDD の空き、マウント確認用マーカーを確認する。マーカーは 2 つ必要: `/mnt/photo/.photosaver.mount-ok`
+(窓口が確認)と `/mnt/photo/immich-library/.photosaver.mount-ok`(Immich の mount-guard が確認)。
+詳細は `tasks.md` の T1。`photosaver_gw` が未反映なら [operations.md](operations.md) の「compose 設定の反映」(T2b)。
 
 ### 2. Tailscale 管理画面
 
@@ -109,6 +111,12 @@ Funnel の帯域上限は非公開のため、**実機で測って採否を決�
 **合格の目安**: モバイル回線で 1GB が 15 分以内、5台同時でもエラーなし。
 満たさない場合の代替: 国内 VPS 経由(月1,000円程度)、または Cloudflare Tunnel
 (tus の分割で 100MB 制限は回避可能。ただし CLAUDE.md のルール変更が必要)。
+
+### 4. 本番準備(取り込みモード)
+
+`scripts/setup-event.js` で結婚式専用ユーザー・アルバム・共有リンク・削除専用キーを作り、窓口を取り込みモードに
+切り替える。手順は [guest-gateway/README.md](../guest-gateway/README.md) の「取り込みモードに切り替える」、
+スマホでの通し確認(まとめて保存を含む)は `tasks.md` の T4。
 
 ## 当日の運用
 
