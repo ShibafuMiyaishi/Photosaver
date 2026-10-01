@@ -18,6 +18,35 @@ describe('loadConfig', () => {
     expect(config.keepUploads).toBe(false);
     expect(config.cookieSecure).toBe(true);
     expect(config.closesAt).toBe(Date.parse(VALID.CLOSES_AT));
+    expect(config.immich).toBeNull();
+  });
+
+  const IMPORT = {
+    IMMICH_SHARE_KEY: 'share-key-from-setup-event',
+    IMMICH_ALBUM_ID: '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b',
+    DB_PATH: '/data/db/gateway.db',
+  };
+
+  it('enables import mode when the share key is set', () => {
+    const config = loadConfig({ ...VALID, ...IMPORT });
+    expect(config.immich).toEqual({
+      baseUrl: 'http://immich-server:2283/',
+      shareKey: IMPORT.IMMICH_SHARE_KEY,
+      albumId: IMPORT.IMMICH_ALBUM_ID,
+      deleteApiKey: '',
+      dbPath: IMPORT.DB_PATH,
+    });
+  });
+
+  it.each([
+    ['placeholder share key', { IMMICH_SHARE_KEY: 'CHANGE_ME' }],
+    ['missing album id', { IMMICH_ALBUM_ID: '' }],
+    ['non-UUID album id', { IMMICH_ALBUM_ID: '../albums' }],
+    ['missing DB path', { DB_PATH: '' }],
+    ['relative Immich URL', { IMMICH_URL: 'immich-server:2283' }],
+    ['non-http Immich URL', { IMMICH_URL: 'file:///etc/passwd' }],
+  ])('rejects import mode with %s', (_label, override) => {
+    expect(() => loadConfig({ ...VALID, ...IMPORT, ...override })).toThrow();
   });
 
   it.each([

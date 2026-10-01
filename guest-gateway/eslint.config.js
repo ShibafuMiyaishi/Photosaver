@@ -12,6 +12,7 @@ const nodeGlobals = {
   fetch: 'readonly',
   URL: 'readonly',
   AbortSignal: 'readonly',
+  AbortController: 'readonly',
   FormData: 'readonly',
 };
 
@@ -22,6 +23,11 @@ const browserGlobals = {
   fetch: 'readonly',
   performance: 'readonly',
   console: 'readonly',
+  setTimeout: 'readonly',
+  clearTimeout: 'readonly',
+  URL: 'readonly',
+  localStorage: 'readonly',
+  encodeURIComponent: 'readonly',
 };
 
 const vitestGlobals = {

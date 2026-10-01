@@ -7,7 +7,13 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
-import { newDeviceId, signSession, verifyPassword, verifySession } from './auth.js';
+import {
+  newDeviceId,
+  normalizeNickname,
+  signSession,
+  verifyPassword,
+  verifySession,
+} from './auth.js';
 import { createLockout } from './lockout.js';
 import { log } from './log.js';
 import { createTusServer } from './uploads.js';
@@ -23,6 +29,9 @@ export const CSRF_VALUE = 'guest-gateway';
 
 const TUS_ROUTE = /^\/files(?:\/[A-Za-z0-9_-]+)?\/?$/;
 const TUS_METHODS = new Set(['POST', 'PATCH', 'HEAD']);
+const UPLOAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
+// Per status request; the client polls in batches of this size.
+export const MAX_STATUS_IDS = 100;
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // A login body is tiny; a client that has not sent it by then is stalling on purpose.
 const LOGIN_BODY_TIMEOUT_MS = 10_000;
@@ -54,10 +63,25 @@ function shortHash(value) {
 
 /**
  * @param {ReturnType<import('./config.js').loadConfig>} config
+ * @param {{
+ *   store?: ReturnType<import('./store.js').openStore>,
+ *   importer?: ReturnType<import('./importer.js').createImporter>,
+ * }} [deps] both set = import mode; neither = speed-test mode (files are not imported)
  */
-export function createApp(config) {
+export function createApp(config, { store, importer } = {}) {
   const app = express();
-  const tusServer = createTusServer(config);
+  const importing = Boolean(store && importer);
+  const tusServer = createTusServer(
+    config,
+    importing
+      ? {
+          onReceived(file) {
+            store.add(file);
+            importer.enqueue(file.uploadId);
+          },
+        }
+      : {},
+  );
   const lockout = createLockout();
   const isClosed = () => Date.now() >= config.closesAt;
 
@@ -146,7 +170,12 @@ export function createApp(config) {
   });
 
   app.get('/api/session', (req, res) => {
-    res.json({ authenticated: Boolean(req.gwSession), closesAt: new Date(config.closesAt) });
+    res.json({
+      authenticated: Boolean(req.gwSession),
+      nickname: req.gwSession?.nickname ?? null,
+      importing,
+      closesAt: new Date(config.closesAt),
+    });
   });
 
   const parseLoginBody = express.json({ limit: '1kb' });
@@ -192,6 +221,8 @@ export function createApp(config) {
     if (typeof password !== 'string' || password.length === 0 || password.length > 256) {
       return res.status(400).json({ error: 'bad_request' });
     }
+    const nickname = normalizeNickname(req.body?.nickname);
+    if (!nickname) return res.status(400).json({ error: 'bad_nickname' });
     // Reserve the attempt synchronously and start scrypt with no await in between: the lock
     // check and the in-flight mark happen atomically, so parallel requests cannot all slip past
     // the lockout while scrypt runs, and a slot is only ever held for one password check.
@@ -208,7 +239,7 @@ export function createApp(config) {
         return res.status(401).json({ error: 'wrong_password' });
       }
       lockout.recordSuccess(req.ip);
-      const session = { deviceId: newDeviceId(), role: 'guest', exp: config.closesAt };
+      const session = { deviceId: newDeviceId(), nickname, role: 'guest', exp: config.closesAt };
       res.cookie(cookieName(config), signSession(session, config.sessionSecret), {
         httpOnly: true,
         secure: config.cookieSecure,
@@ -226,6 +257,21 @@ export function createApp(config) {
   // Speed-test diagnostics: which client address the app sees behind Funnel.
   app.get('/api/whoami', requireSession, (req, res) => {
     res.json({ ip: req.ip, viaFunnel: Boolean(req.get('tailscale-funnel-request')) });
+  });
+
+  // Import status of the caller's own uploads (the client polls this after each upload).
+  // `?ids=a,b,c` asks for the uploads the client is still waiting on (any age); without it the
+  // newest uploads are listed.
+  app.get('/api/uploads', requireSession, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!importing) return res.json({ uploads: [] });
+    const { deviceId } = req.gwSession;
+    if (req.query.ids === undefined) return res.json({ uploads: store.listForDevice(deviceId) });
+    const ids = typeof req.query.ids === 'string' ? req.query.ids.split(',') : [];
+    if (ids.length === 0 || ids.length > MAX_STATUS_IDS || !ids.every((id) => UPLOAD_ID.test(id))) {
+      return res.status(400).json({ error: 'bad_request' });
+    }
+    return res.json({ uploads: store.statusForDevice(deviceId, ids) });
   });
 
   app.all(TUS_ROUTE, requireSession, (req, res, next) => {

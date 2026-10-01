@@ -4,22 +4,25 @@
 写真・動画をアップロードできる窓口。設計と運用は [docs/guest-gateway.md](../docs/guest-gateway.md)、
 実装ルールは [.claude/rules/guest-gateway.md](../.claude/rules/guest-gateway.md)。
 
-> **現在は速度検証版**: tus で受信 → 中身を判定 → 計測ログを出して削除するところまで。
-> Immich への取り込み・閲覧・削除はまだ無い。
+> **現在の到達点**: ニックネーム + 合言葉でログイン → tus で受信 → 中身を判定 → 取り込みキューで
+> Immich のアルバムへ追加(`IMMICH_SHARE_KEY` 未設定なら受信して削除するだけの速度検証モード)。
+> 閲覧・削除はまだ無い。
 
 ## 構成
 
-| パス | 内容 |
-|---|---|
-| `src/index.js` | 起動・定期処理(期限切れアップロードの掃除、受付終了時のステージング削除) |
-| `src/app.js` | ルート定義(ここに無いものは 404)、セキュリティヘッダー、CSRF 対策、期限切れ時の 410 |
-| `src/auth.js` | 合言葉の scrypt 照合、HMAC 署名付きセッション Cookie |
-| `src/uploads.js` | tus 受信(拡張子・サイズ・空き容量の検査、中身の判定、計測ログ) |
-| `src/immich.js` | Immich v3 の呼び出し(共有リンクキーでアップロード・一覧、削除専用キーで削除)。まだ窓口本体には未接続 |
-| `scripts/setup-event.js` | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化 |
-| `dev/compose.yml` | 開発用 Immich v3.2.4(Mac のローカル専用) |
-| `public/` | ゲスト用画面(ビルド工程なし) |
-| `compose.yml` / `ts-config/serve.json` | Tailscale サイドカー(Funnel で 443 公開)+ 窓口 |
+| パス                                   | 内容                                                                                |
+| -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `src/index.js`                         | 起動・定期処理(期限切れアップロードの掃除、受付終了時のステージング削除)            |
+| `src/app.js`                           | ルート定義(ここに無いものは 404)、セキュリティヘッダー、CSRF 対策、期限切れ時の 410 |
+| `src/auth.js`                          | 合言葉の scrypt 照合、HMAC 署名付きセッション Cookie、ニックネームの正規化          |
+| `src/uploads.js`                       | tus 受信(拡張子・サイズ・空き容量の検査、中身の判定、計測ログ)→ 取り込み待ちへ移動  |
+| `src/importer.js`                      | 取り込みキュー(Immich へ送信・再試行・結果の記録・ステージング削除)                 |
+| `src/store.js`                         | 受信ファイルと取り込み結果の記録(`node:sqlite`、`DB_PATH`)                          |
+| `src/immich.js`                        | Immich v3 の呼び出し(共有リンクキーでアップロード・一覧、削除専用キーで削除)        |
+| `scripts/setup-event.js`               | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化  |
+| `dev/compose.yml`                      | 開発用 Immich v3.2.4(Mac のローカル専用)                                            |
+| `public/`                              | ゲスト用画面(ビルド工程なし)                                                        |
+| `compose.yml` / `ts-config/serve.json` | Tailscale サイドカー(Funnel で 443 公開)+ 窓口                                      |
 
 ## 開発(Mac)
 
@@ -40,6 +43,10 @@ CLOSES_AT=2026-12-31T23:59:00+09:00 STAGING_DIR=../tmp/dev-staging \
 COOKIE_SECURE=false MIN_FREE_GB=1 npm start
 # → http://127.0.0.1:8080
 ```
+
+開発用 Immich へ実際に取り込む場合は、`scripts/setup-event.js` の出力ファイルを読み込み、
+`IMMICH_URL=http://127.0.0.1:2283 DB_PATH=../tmp/dev-gateway.db` を足して起動する
+(例: `set -a && . ../tmp/dev-immich/event1.env && set +a` の後に上のコマンド)。
 
 ### 開発用 Immich(結合テスト用)
 

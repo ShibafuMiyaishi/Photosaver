@@ -1,6 +1,12 @@
 // guest-gateway/test/auth.test.js
 
-import { hashPassword, signSession, verifyPassword, verifySession } from '../src/auth.js';
+import {
+  hashPassword,
+  normalizeNickname,
+  signSession,
+  verifyPassword,
+  verifySession,
+} from '../src/auth.js';
 
 const SECRET = 's'.repeat(64);
 
@@ -22,7 +28,12 @@ describe('password hashing', () => {
 });
 
 describe('session tokens', () => {
-  const session = { deviceId: 'dev-1', role: 'guest', exp: Date.now() + 60_000 };
+  const session = {
+    deviceId: 'dev-1',
+    nickname: 'たろう',
+    role: 'guest',
+    exp: Date.now() + 60_000,
+  };
 
   it('round-trips a signed session', () => {
     const token = signSession(session, SECRET);
@@ -40,8 +51,34 @@ describe('session tokens', () => {
     expect(verifySession(undefined, SECRET)).toBeNull();
   });
 
+  it('rejects sessions without a nickname (issued before nicknames existed)', () => {
+    const legacy = { ...session };
+    delete legacy.nickname;
+    expect(verifySession(signSession(legacy, SECRET), SECRET)).toBeNull();
+  });
+
   it('rejects expired sessions', () => {
     const token = signSession({ ...session, exp: Date.now() - 1 }, SECRET);
     expect(verifySession(token, SECRET)).toBeNull();
   });
+});
+
+describe('normalizeNickname', () => {
+  it.each([
+    ['  たろう  ', 'たろう'],
+    ['山田\n花子', '山田 花子'],
+    ['a\u202Eb', 'ab'],
+    ['\uFEFFけん', 'けん'],
+    ['👨\u200D👩\u200D👧', '👨\u200D👩\u200D👧'],
+    ['x'.repeat(20), 'x'.repeat(20)],
+  ])('normalizes %j', (input, expected) => {
+    expect(normalizeNickname(input)).toBe(expected);
+  });
+
+  it.each([['x'.repeat(21)], [''], ['   '], ['\u200B'], [undefined], [42], ['a'.repeat(201)]])(
+    'rejects %j',
+    (input) => {
+      expect(normalizeNickname(input)).toBeNull();
+    },
+  );
 });

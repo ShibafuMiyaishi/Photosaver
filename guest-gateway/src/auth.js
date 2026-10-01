@@ -1,5 +1,5 @@
 // guest-gateway/src/auth.js
-// 合言葉のハッシュ照合(scrypt)と、HMAC 署名付きセッション Cookie の発行・検証。
+// 合言葉のハッシュ照合(scrypt)と、HMAC 署名付きセッション Cookie の発行・検証、ニックネームの正規化。
 
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
@@ -40,8 +40,27 @@ function sign(payloadB64, secret) {
   return crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
 }
 
+export const NICKNAME_MAX_LENGTH = 20;
+
 /**
- * @param {{ deviceId: string, role: 'guest', exp: number }} session
+ * Normalize a guest nickname: NFC, no control/format characters (incl. bidi overrides; the
+ * zero-width joiner stays for emoji sequences), single spaces, 1..20 characters.
+ * Returns null if nothing usable remains.
+ */
+export function normalizeNickname(value) {
+  if (typeof value !== 'string' || value.length > 200) return null;
+  const cleaned = value
+    .normalize('NFC')
+    .replace(/\s+/gv, ' ')
+    .replace(/[[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]--[\u200D]]/gv, '')
+    .replace(/ {2,}/gv, ' ')
+    .trim();
+  const length = [...cleaned].length;
+  return length >= 1 && length <= NICKNAME_MAX_LENGTH ? cleaned : null;
+}
+
+/**
+ * @param {{ deviceId: string, nickname: string, role: 'guest', exp: number }} session
  */
 export function signSession(session, secret) {
   const payloadB64 = Buffer.from(JSON.stringify(session)).toString('base64url');
@@ -61,7 +80,12 @@ export function verifySession(token, secret, now = Date.now()) {
   } catch {
     return null;
   }
-  if (!session || typeof session.deviceId !== 'string' || typeof session.exp !== 'number') {
+  if (
+    !session ||
+    typeof session.deviceId !== 'string' ||
+    typeof session.nickname !== 'string' ||
+    typeof session.exp !== 'number'
+  ) {
     return null;
   }
   if (session.exp <= now) return null;
