@@ -139,4 +139,45 @@ describe('upload store', () => {
       await fs.rm(`${file}-shm`, { force: true });
     }
   });
+  it('summarizes counts for the operator, per asset for deletions', () => {
+    store.add(ROW);
+    store.add({ ...ROW, uploadId: 'u2', size: 100 });
+    store.markImported('u2', 'created', 'a2');
+    store.add({ ...ROW, uploadId: 'u3', deviceId: 'dev-2', size: 10 });
+    store.markImported('u3', 'duplicate', 'a2');
+    store.add({ ...ROW, uploadId: 'u4', deviceId: 'dev-2' });
+    store.markFailed('u4');
+    store.markDeleted('a2');
+    expect(store.stats()).toEqual({
+      byStatus: {
+        pending: { count: 1, bytes: 1234 },
+        created: { count: 1, bytes: 100 },
+        duplicate: { count: 1, bytes: 10 },
+        failed: { count: 1, bytes: 1234 },
+        trashed: { count: 0, bytes: 0 },
+      },
+      devices: 2,
+      deleted: 1,
+      oldestPendingAt: 1000,
+    });
+  });
+
+  it('opens read-only next to a running gateway without writing', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { TMP_ROOT } = await import('./helpers/server.js');
+    await fs.mkdir(TMP_ROOT, { recursive: true });
+    const file = path.join(TMP_ROOT, `ro-${Date.now()}.db`);
+    const live = openStore(file);
+    const reader = openStore(file, { readOnly: true });
+    try {
+      live.add(ROW);
+      expect(reader.stats().byStatus.pending.count).toBe(1);
+      expect(() => reader.add({ ...ROW, uploadId: 'other' })).toThrow();
+    } finally {
+      reader.close();
+      live.close();
+      for (const suffix of ['', '-wal', '-shm']) await fs.rm(`${file}${suffix}`, { force: true });
+    }
+  });
 });

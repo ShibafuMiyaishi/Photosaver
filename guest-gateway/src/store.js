@@ -37,17 +37,24 @@ CREATE INDEX IF NOT EXISTS uploads_asset ON uploads (asset_id);
 
 /**
  * @param {string} dbPath file path, or ':memory:' in tests
+ * @param {{ now?: () => number, readOnly?: boolean }} [options] readOnly: for the operator's
+ *   status script next to the running gateway (no schema changes, writes fail)
  */
-export function openStore(dbPath, { now = Date.now } = {}) {
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  db.exec(SCHEMA);
-  // Databases created before deleted_at existed (development/test runs).
-  const columns = db
-    .prepare('PRAGMA table_info(uploads)')
-    .all()
-    .map((c) => c.name);
-  if (!columns.includes('deleted_at')) db.exec('ALTER TABLE uploads ADD COLUMN deleted_at INTEGER');
+export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
+  const db = new DatabaseSync(dbPath, { readOnly });
+  db.exec('PRAGMA busy_timeout = 5000;');
+  if (!readOnly) {
+    db.exec('PRAGMA journal_mode = WAL;');
+    db.exec(SCHEMA);
+    // Databases created before deleted_at existed (development/test runs).
+    const columns = db
+      .prepare('PRAGMA table_info(uploads)')
+      .all()
+      .map((c) => c.name);
+    if (!columns.includes('deleted_at')) {
+      db.exec('ALTER TABLE uploads ADD COLUMN deleted_at INTEGER');
+    }
+  }
 
   const insert = db.prepare(`
     INSERT OR IGNORE INTO uploads
@@ -95,6 +102,14 @@ export function openStore(dbPath, { now = Date.now } = {}) {
   const pending = db.prepare(
     "SELECT * FROM uploads WHERE status = 'pending' ORDER BY created_at, rowid",
   );
+  const countsByStatus = db.prepare(
+    'SELECT status, COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes FROM uploads GROUP BY status',
+  );
+  const totals = db.prepare(`
+    SELECT COUNT(DISTINCT device_id) AS devices,
+      COUNT(DISTINCT asset_id) FILTER (WHERE deleted_at IS NOT NULL) AS deleted,
+      MIN(created_at) FILTER (WHERE status = 'pending') AS oldest_pending_at
+    FROM uploads`);
 
   return {
     /**
@@ -191,6 +206,24 @@ export function openStore(dbPath, { now = Date.now } = {}) {
     /** True when this asset was deleted through the gateway and not seen restored since. */
     wasDeleted(assetId) {
       return deletedAsset.get(assetId) !== undefined;
+    },
+
+    /**
+     * Counts for the operator (no nicknames or file names): per status { count, bytes },
+     * devices that uploaded, assets deleted through the gateway, and when the oldest pending row arrived.
+     */
+    stats() {
+      const byStatus = Object.fromEntries(STATUSES.map((s) => [s, { count: 0, bytes: 0 }]));
+      for (const row of countsByStatus.all()) {
+        byStatus[row.status] = { count: row.count, bytes: row.bytes };
+      }
+      const t = totals.get();
+      return {
+        byStatus,
+        devices: t.devices,
+        deleted: t.deleted,
+        oldestPendingAt: t.oldest_pending_at ?? null,
+      };
     },
 
     /** Rows still waiting for Immich, oldest first (resumed after a restart). */

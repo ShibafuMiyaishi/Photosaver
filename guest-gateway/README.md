@@ -190,3 +190,6 @@ docker compose -p wedding-gw down
 
 ログの見方: `import_done`(取り込み成功)、`import_retry`(Immich 側の一時的な失敗、自動で再試行)、
 `import_failed`(諦めた。Immich が拒否した or 再試行上限)。窓口を再起動しても取り込み待ちの分は続きから再開する。
+件数の確認は `docker exec guest_gateway node scripts/event-status.js`(読み取り専用。件数・容量・期限までの残り・
+HDD の空きを表示し、取り込みの詰まりや失敗があれば ⚠️ を出す)。当日の手順は
+[docs/guest-gateway.md](../docs/guest-gateway.md#当日の運用)。
