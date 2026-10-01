@@ -369,7 +369,7 @@ function createUpload(item) {
       } else {
         item.status = 'error';
         if (status === 401) requireLogin();
-        // Offline: no timer; pause the queue until 'online' (or 再試行) resumes it.
+        // Offline: no per-item timer; pause the queue until 'online', 再試行 or the 10 s check.
         else if (isOffline()) {
           offlinePause = true;
           scheduleOfflineCheck();
