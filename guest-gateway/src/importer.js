@@ -87,8 +87,15 @@ export function createImporter({
         lastModified: row.last_modified,
         signal: stopController.signal,
       });
-      store.markImported(uploadId, result.status, result.id);
-      log('info', 'import_done', { id: uploadId, status: result.status, attempts });
+      // A duplicate of something deleted here is the trashed copy, which stays out of the album —
+      // unless the organiser restored it meanwhile.
+      let status = result.status;
+      if (status === 'duplicate' && store.wasDeleted(result.id)) {
+        if (await immich.isAssetVisible(result.id)) store.clearDeleted(result.id);
+        else status = 'trashed';
+      }
+      store.markImported(uploadId, status, result.id);
+      log('info', 'import_done', { id: uploadId, status, attempts });
       await discard(uploadId);
       return 'done';
     } catch (err) {

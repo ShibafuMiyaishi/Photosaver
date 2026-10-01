@@ -59,8 +59,10 @@ export function normalizeNickname(value) {
   return length >= 1 && length <= NICKNAME_MAX_LENGTH ? cleaned : null;
 }
 
+export const ROLES = new Set(['guest', 'admin']);
+
 /**
- * @param {{ deviceId: string, nickname: string, role: 'guest', exp: number }} session
+ * @param {{ deviceId: string, nickname: string, role: 'guest'|'admin', exp: number }} session
  */
 export function signSession(session, secret) {
   const payloadB64 = Buffer.from(JSON.stringify(session)).toString('base64url');
@@ -84,6 +86,7 @@ export function verifySession(token, secret, now = Date.now()) {
     !session ||
     typeof session.deviceId !== 'string' ||
     typeof session.nickname !== 'string' ||
+    !ROLES.has(session.role) ||
     typeof session.exp !== 'number'
   ) {
     return null;

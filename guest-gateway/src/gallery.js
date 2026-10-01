@@ -72,6 +72,7 @@ function compareAssets(a, b) {
  *   store: ReturnType<import('./store.js').openStore>,
  *   albumId: string,
  *   closesAt: number,
+ *   deleteEnabled?: boolean,
  *   now?: () => number,
  *   heavyIdleMs?: number,
  * }} deps
@@ -81,6 +82,7 @@ export function createGalleryRouter({
   store,
   albumId,
   closesAt,
+  deleteEnabled = false,
   now = Date.now,
   heavyIdleMs = HEAVY_IDLE_MS,
 }) {
@@ -160,6 +162,48 @@ export function createGalleryRouter({
       return res.send(await gzip(body));
     }
     return res.send(body);
+  });
+
+  // Guests delete what their own device uploaded; the organiser (admin) deletes anything.
+  // Never `force`: assets go to the event user's trash and can be restored in Immich.
+  router.delete('/api/assets/:id', async (req, res, next) => {
+    const { id } = req.params;
+    if (!isUuid(id) || !deleteEnabled) return next();
+    const { deviceId, role } = req.gwSession;
+    if (role === 'admin') {
+      // Even the organiser deletes only what is in the event album right now: the delete key
+      // could also trash anything else the event user owns.
+      let album;
+      try {
+        album = await loadAlbum();
+      } catch (err) {
+        log('error', 'gallery_list_failed', { error: err.message });
+        return res.status(502).json({ error: 'unavailable' });
+      }
+      if (!album.assets.some((a) => a.id === id))
+        return res.status(404).json({ error: 'not_found' });
+    } else if (!store.isOwnAsset(id, deviceId)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    try {
+      await immich.deleteAssets([id]);
+    } catch (err) {
+      const status = err.status ?? 0;
+      // Gone already. Anything else (401/403: wrong or under-permissioned delete key) is a setup
+      // problem the organiser must see in the logs, never a silent "deleted".
+      if (status === 400 || status === 404) return res.status(404).json({ error: 'not_found' });
+      log('error', 'asset_delete_failed', { status, error: err.message });
+      return res.status(502).json({ error: 'unavailable' });
+    }
+    store.markDeleted(id);
+    // The next listing must not show it any more.
+    cache = null;
+    log('info', 'asset_deleted', {
+      asset: id.slice(0, 8),
+      role,
+      device: req.gwSession.deviceShort,
+    });
+    return res.json({ ok: true });
   });
 
   router.get('/media/:id/:kind', async (req, res, next) => {

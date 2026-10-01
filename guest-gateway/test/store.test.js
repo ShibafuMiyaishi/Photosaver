@@ -91,4 +91,52 @@ describe('upload store', () => {
     expect(found.size).toBe(1201);
     expect(found.get('asset-1200').nickname).toBe('n1200');
   });
+
+  it('decides ownership by created uploads only and keeps it across delete and restore', () => {
+    const asset = '3f1c2b4a-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    store.add({ ...ROW, uploadId: 'mine' });
+    store.markImported('mine', 'created', asset);
+    store.add({ ...ROW, uploadId: 'copy', deviceId: 'dev-2' });
+    store.markImported('copy', 'duplicate', asset);
+    expect(store.isOwnAsset(asset, 'dev-1')).toBe(true);
+    expect(store.isOwnAsset(asset, 'dev-2')).toBe(false);
+
+    expect(store.wasDeleted(asset)).toBe(false);
+    store.markDeleted(asset);
+    expect(store.wasDeleted(asset)).toBe(true);
+    // Statuses are untouched, so a restore in Immich brings attribution and ownership back.
+    expect(store.get('mine').status).toBe('created');
+    expect(store.get('copy').status).toBe('duplicate');
+    expect(store.isOwnAsset(asset, 'dev-1')).toBe(true);
+    expect(store.uploaders([asset]).get(asset).nickname).toBe('たろう');
+    store.clearDeleted(asset);
+    expect(store.wasDeleted(asset)).toBe(false);
+  });
+
+  it('adds deleted_at to a database created before it existed', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { TMP_ROOT } = await import('./helpers/server.js');
+    await fs.mkdir(TMP_ROOT, { recursive: true });
+    const file = path.join(TMP_ROOT, `old-${Date.now()}.db`);
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE uploads (upload_id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+      nickname TEXT NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+      last_modified INTEGER, status TEXT NOT NULL DEFAULT 'pending', asset_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+    old.close();
+    const migrated = openStore(file);
+    try {
+      migrated.add(ROW);
+      migrated.markImported(ROW.uploadId, 'created', 'a1');
+      migrated.markDeleted('a1');
+      expect(migrated.wasDeleted('a1')).toBe(true);
+    } finally {
+      migrated.close();
+      await fs.rm(file, { force: true });
+      await fs.rm(`${file}-wal`, { force: true });
+      await fs.rm(`${file}-shm`, { force: true });
+    }
+  });
 });

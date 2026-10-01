@@ -208,4 +208,39 @@ describe('import queue', () => {
     expect(store.get('u1').status).toBe('pending');
     expect(await exists('u1')).toBe(true);
   });
+
+  it.each([
+    [false, 'trashed', true],
+    [true, 'duplicate', false],
+  ])(
+    're-upload of an asset deleted here: visible=%s → %s',
+    async (visible, expected, stillMarked) => {
+      importer = createImporter({
+        store,
+        immich: {
+          uploadAsset: async () => ({ status: 'duplicate', id: ASSET_ID }),
+          // Trashed assets are not readable through the share link; restored ones are.
+          isAssetVisible: async () => visible,
+        },
+        dir,
+        retryDelaysMs: [5],
+      });
+      store.add({
+        uploadId: 'old',
+        deviceId: 'dev-1',
+        nickname: 'たろう',
+        filename: 'a.jpg',
+        mime: 'image/jpeg',
+        size: 5,
+        lastModified: null,
+      });
+      store.markImported('old', 'created', ASSET_ID);
+      store.markDeleted(ASSET_ID);
+      await receive('u1');
+      importer.enqueue('u1');
+      await importer.idle();
+      expect(store.get('u1')).toMatchObject({ status: expected, asset_id: ASSET_ID });
+      expect(store.wasDeleted(ASSET_ID)).toBe(stillMarked);
+    },
+  );
 });

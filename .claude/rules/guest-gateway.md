@@ -135,6 +135,20 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   A video/original stream that moves no bytes for 60 s is closed (players re-request with Range).
 - A fresh upload's thumbnail is 404 until Immich's thumbnail job ran: show a placeholder
   (thumbhash) and retry later.
+- `DELETE /api/assets/:id` (CSRF header required; 404 when IMMICH_DELETE_API_KEY is unset).
+  Guest: only assets whose upload row from the caller's device is `created` (a `duplicate` of
+  someone else's photo does not count) → else 403. Admin (`ADMIN_PASSWORD_HASH`, optional; the
+  guest password is checked first so equal passwords never grant admin; admin cookies carry a
+  fingerprint of the hash and are demoted to guest when it changes): any asset in the current
+  album listing → else 404. Never `force` (goes to the event user's trash). Immich 400/404 → 404;
+  401/403/5xx → logged `asset_delete_failed` + 502 (a bad key must not look like success).
+  Success sets `deleted_at` on the rows (statuses stay, so a restore in Immich brings ownership
+  and attribution back) and drops the shared listing cache.
+- Re-uploading a file whose asset was trashed returns `duplicate` with the trashed id and does NOT
+  re-add it to the album (verified v3.2.4). `GET /api/assets/{id}` with the share key answers 200
+  for album assets and 400 for trashed ones (verified): the importer uses it to record `trashed`
+  (UI explains) or, if the organiser restored it, a normal `duplicate` + clears `deleted_at`.
+  The share key cannot restore from trash — the organiser restores in Immich.
 
 ## Client-side gotchas (iOS especially)
 

@@ -166,12 +166,15 @@ describe.skipIf(!RUN)('Immich v3 integration (dev Immich)', () => {
   it('deletes with the delete-only API key', async () => {
     const page = await client.listAlbumAssets({ albumId: event.albumId });
     const [victim] = page.items;
+    expect(await client.isAssetVisible(victim.id)).toBe(true);
     await client.deleteAssets([victim.id]);
     const gone = await waitFor(async () => {
       const after = await client.listAlbumAssets({ albumId: event.albumId });
       return after.items.every((a) => a.id !== victim.id);
     });
     expect(gone).toBe(true);
+    // Trashed assets are no longer readable through the share link.
+    expect(await client.isAssetVisible(victim.id)).toBe(false);
   });
 
   it('rejects a wrong share key', async () => {

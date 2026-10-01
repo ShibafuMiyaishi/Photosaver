@@ -24,6 +24,9 @@ let importing = false;
 let pollTimer = null;
 // Set once the server reports the gallery (import mode).
 let galleryEnabled = false;
+// Role and delete availability from the server (admin = organiser, may delete anything).
+// sessionId changes on every login so the gallery knows its `mine` flags are stale.
+const permissions = { role: 'guest', canDelete: false, sessionId: 0 };
 let gallery = null;
 
 function formatBytes(bytes) {
@@ -126,6 +129,7 @@ function showTab(name) {
   $('tab-gallery').setAttribute('aria-pressed', String(name === 'gallery'));
   if (name === 'gallery') {
     gallery ??= initGallery(api, { onUnauthorized: () => show('login') });
+    gallery.setPermissions({ ...permissions });
     gallery.show();
   }
 }
@@ -137,7 +141,8 @@ function enterApp() {
 }
 
 function setGreeting(nickname) {
-  $('greeting').textContent = nickname ? `${nickname} さん、ようこそ` : '';
+  const admin = permissions.role === 'admin' ? '(管理者モード: すべての写真を削除できます)' : '';
+  $('greeting').textContent = nickname ? `${nickname} さん、ようこそ${admin}` : '';
 }
 
 function rememberNickname(nickname) {
@@ -161,6 +166,10 @@ function recallNickname() {
 const IMPORT_RESULT = {
   created: { status: 'done', text: '完了 — アルバムに追加しました' },
   duplicate: { status: 'done', text: '完了 — 同じ写真が既にアルバムにあります' },
+  trashed: {
+    status: 'rejected',
+    text: '以前に削除された写真のため追加されませんでした(戻したい場合は幹事に連絡してください)',
+  },
   failed: {
     status: 'rejected',
     text: 'アルバムへの追加に失敗しました(お手数ですが幹事に連絡してください)',
@@ -396,9 +405,13 @@ async function init() {
     closesAt,
     importing: importEnabled,
     gallery: galleryOn,
+    role,
+    canDelete,
   } = await res.json();
   importing = Boolean(importEnabled);
   galleryEnabled = Boolean(galleryOn);
+  permissions.role = role ?? 'guest';
+  permissions.canDelete = Boolean(canDelete);
   $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
   if (authenticated) {
     setGreeting(nickname);
@@ -426,6 +439,9 @@ async function submitLogin() {
   }
   if (res.ok) {
     $('password').value = '';
+    const { role } = await res.json().catch(() => ({}));
+    permissions.role = role ?? 'guest';
+    permissions.sessionId += 1;
     const nickname = $('nickname').value.trim();
     rememberNickname(nickname);
     setGreeting(nickname);

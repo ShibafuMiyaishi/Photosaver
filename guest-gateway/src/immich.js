@@ -153,6 +153,22 @@ export function createImmichClient({
       return { status: data.status, id: data.id };
     },
 
+    /**
+     * Whether an asset is currently readable through the share link: true for album assets,
+     * false (Immich answers 400) for assets in the trash. Verified on v3.2.4.
+     */
+    async isAssetVisible(id) {
+      if (!isUuid(id)) throw new ImmichError('asset', 0);
+      try {
+        const res = await request('asset', `assets/${id}`, { auth: 'share' });
+        await res.body?.cancel().catch(() => {});
+        return true;
+      } catch (err) {
+        if (err instanceof ImmichError && (err.status === 400 || err.status === 404)) return false;
+        throw err;
+      }
+    },
+
     async getAlbum(albumId) {
       if (!isUuid(albumId)) throw new ImmichError('album', 0);
       const res = await request('album', `albums/${albumId}`, { auth: 'share' });

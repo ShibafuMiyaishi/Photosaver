@@ -19,6 +19,7 @@ describe('loadConfig', () => {
     expect(config.cookieSecure).toBe(true);
     expect(config.closesAt).toBe(Date.parse(VALID.CLOSES_AT));
     expect(config.immich).toBeNull();
+    expect(config.adminPasswordHash).toBe('');
   });
 
   const IMPORT = {
@@ -57,6 +58,7 @@ describe('loadConfig', () => {
     ['bad deadline', { CLOSES_AT: 'next friday' }],
     ['missing staging dir', { STAGING_DIR: '' }],
     ['negative size', { MAX_FILE_GB: '-1' }],
+    ['non-scrypt admin hash', { ADMIN_PASSWORD_HASH: 'plaintext-password' }],
   ])('rejects %s', (_label, override) => {
     expect(() => loadConfig({ ...VALID, ...override })).toThrow();
   });

@@ -57,6 +57,15 @@ describe('session tokens', () => {
     expect(verifySession(signSession(legacy, SECRET), SECRET)).toBeNull();
   });
 
+  it('accepts guest and admin roles only', () => {
+    expect(verifySession(signSession({ ...session, role: 'admin' }, SECRET), SECRET)).toMatchObject(
+      {
+        role: 'admin',
+      },
+    );
+    expect(verifySession(signSession({ ...session, role: 'root' }, SECRET), SECRET)).toBeNull();
+  });
+
   it('rejects expired sessions', () => {
     const token = signSession({ ...session, exp: Date.now() - 1 }, SECRET);
     expect(verifySession(token, SECRET)).toBeNull();
