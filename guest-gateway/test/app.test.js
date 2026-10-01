@@ -93,6 +93,35 @@ describe('open gateway', () => {
     expect(correct.cookie).toBe('');
   });
 
+  it('does not let parallel wrong passwords bypass the lockout', async () => {
+    const burst = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => login(srv.baseUrl, `parallel-${i}`)),
+    );
+    const statuses = burst.map(({ res }) => res.status);
+    expect(statuses.every((s) => s === 401 || s === 429)).toBe(true);
+    let failures = statuses.filter((s) => s === 401).length;
+    expect(failures).toBeLessThanOrEqual(5);
+    expect(burst.every(({ cookie }) => cookie === '')).toBe(true);
+
+    // Sequential wrong attempts still lock exactly at the 5th recorded failure.
+    while (failures < 5) {
+      expect((await login(srv.baseUrl, `sequential-${failures}`)).res.status).toBe(401);
+      failures += 1;
+    }
+    const locked = await login(srv.baseUrl, 'one-more');
+    expect(locked.res.status).toBe(429);
+    expect(await locked.res.json()).toEqual({ error: 'too_many_attempts' });
+    const correct = await login(srv.baseUrl);
+    expect(correct.res.status).toBe(429);
+    expect(correct.res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('ignores successful logins in the outer rate limit', { timeout: 30_000 }, async () => {
+    for (let i = 0; i < 31; i += 1) {
+      expect((await login(srv.baseUrl)).res.status).toBe(200);
+    }
+  });
+
   it('refuses uploads without a session', async () => {
     const result = await tusUpload(srv.baseUrl, '', PNG, 'a.png');
     expect(result).toEqual({ ok: false, status: 401 });

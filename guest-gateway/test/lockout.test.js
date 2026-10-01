@@ -141,3 +141,121 @@ describe('createLockout', () => {
     expect(lockout.size()).toBe(0);
   });
 });
+
+describe('beginAttempt', () => {
+  it('allows one attempt in flight per client key', () => {
+    const { lockout } = setup();
+    const first = lockout.beginAttempt('203.0.113.7');
+    expect(first.ok).toBe(true);
+    expect(lockout.beginAttempt('203.0.113.7')).toEqual({
+      ok: false,
+      reason: 'busy',
+      retryAfterSec: 1,
+    });
+    // IPv4-mapped form and the same IPv6 /64 share the key.
+    expect(lockout.beginAttempt('::ffff:203.0.113.7').reason).toBe('busy');
+    const v6 = lockout.beginAttempt('2001:db8:1:2::1');
+    expect(v6.ok).toBe(true);
+    expect(lockout.beginAttempt('2001:db8:1:2:ffff::9').reason).toBe('busy');
+    // A different address is unaffected.
+    const other = lockout.beginAttempt('198.51.100.1');
+    expect(other.ok).toBe(true);
+    first.release();
+    v6.release();
+    other.release();
+    expect(lockout.inFlight()).toBe(0);
+  });
+
+  it('caps the number of attempts in flight globally', () => {
+    const { lockout } = setup({ maxConcurrentAttempts: 3 });
+    const held = [1, 2, 3].map((i) => lockout.beginAttempt(`192.0.2.${i}`));
+    expect(held.every((a) => a.ok)).toBe(true);
+    expect(lockout.beginAttempt('192.0.2.4')).toEqual({
+      ok: false,
+      reason: 'busy',
+      retryAfterSec: 1,
+    });
+    held[0].release();
+    const next = lockout.beginAttempt('192.0.2.4');
+    expect(next.ok).toBe(true);
+    next.release();
+    held[1].release();
+    held[2].release();
+    expect(lockout.inFlight()).toBe(0);
+  });
+
+  it('defaults to 8 concurrent attempts', () => {
+    const { lockout } = setup();
+    const held = Array.from({ length: 8 }, (_, i) => lockout.beginAttempt(`192.0.2.${i}`));
+    expect(held.every((a) => a.ok)).toBe(true);
+    expect(lockout.beginAttempt('192.0.2.100').reason).toBe('busy');
+    for (const a of held) a.release();
+  });
+
+  it('lets a released key try again, and release is idempotent', () => {
+    const { lockout } = setup();
+    const first = lockout.beginAttempt('203.0.113.7');
+    first.release();
+    const second = lockout.beginAttempt('203.0.113.7');
+    expect(second.ok).toBe(true);
+    // A late duplicate release of the old handle must not free the new attempt.
+    first.release();
+    expect(lockout.beginAttempt('203.0.113.7').reason).toBe('busy');
+    second.release();
+    expect(lockout.inFlight()).toBe(0);
+  });
+
+  it('releases the slot when the attempt throws (try/finally)', () => {
+    const { lockout } = setup();
+    const run = () => {
+      const attempt = lockout.beginAttempt('203.0.113.7');
+      try {
+        throw new Error('boom');
+      } finally {
+        attempt.release();
+      }
+    };
+    expect(run).toThrow('boom');
+    expect(lockout.inFlight()).toBe(0);
+    const again = lockout.beginAttempt('203.0.113.7');
+    expect(again.ok).toBe(true);
+    again.release();
+  });
+
+  it('rejects locked addresses and the global pause without reserving a slot', () => {
+    const { clock, lockout } = setup();
+    fail(lockout, '203.0.113.7', 5);
+    expect(lockout.beginAttempt('203.0.113.7')).toEqual({
+      ok: false,
+      reason: 'locked',
+      retryAfterSec: 15 * 60,
+    });
+    expect(lockout.inFlight()).toBe(0);
+
+    for (let i = 0; i < 100; i += 1) lockout.recordFailure(`198.51.100.${i}`);
+    expect(lockout.beginAttempt('192.0.2.1')).toEqual({
+      ok: false,
+      reason: 'paused',
+      retryAfterSec: 5 * 60,
+    });
+    expect(lockout.inFlight()).toBe(0);
+    clock.advance(5 * MIN);
+    const ok = lockout.beginAttempt('192.0.2.1');
+    expect(ok.ok).toBe(true);
+    ok.release();
+  });
+
+  it('keeps in-flight bookkeeping when lockout entries are pruned or evicted', () => {
+    const { clock, lockout } = setup({ maxKeys: 1 });
+    lockout.recordFailure('203.0.113.7');
+    const attempt = lockout.beginAttempt('203.0.113.7');
+    // Evict the entry via the key cap, then let pruning run.
+    lockout.recordFailure('192.0.2.1');
+    clock.advance(24 * HOUR);
+    lockout.check('192.0.2.2');
+    expect(lockout.size()).toBe(0);
+    expect(lockout.beginAttempt('203.0.113.7').reason).toBe('busy');
+    attempt.release();
+    expect(lockout.inFlight()).toBe(0);
+  });
+});

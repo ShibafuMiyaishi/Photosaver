@@ -17,6 +17,7 @@ export const LOCKOUT_DEFAULTS = {
   globalPauseMs: 5 * MINUTE_MS,
   maxKeys: 10_000,
   pruneIntervalMs: MINUTE_MS,
+  maxConcurrentAttempts: 8,
 };
 
 /** Expand an IPv6 address into 8 normalized hextets (no leading zeros). */
@@ -60,6 +61,9 @@ export function createLockout(options = {}) {
   const now = options.now ?? Date.now;
   /** @type {Map<string, { failures: number[], level: number, lockedUntil: number, lastFailure: number }>} */
   const entries = new Map();
+  // Client keys with a password check in flight. Kept apart from `entries` so pruning and
+  // the key cap never drop it; its size is bounded by `maxConcurrentAttempts`.
+  const inFlight = new Set();
   let globalFailures = [];
   let globalPausedUntil = 0;
   let lastPrune = 0;
@@ -80,16 +84,55 @@ export function createLockout(options = {}) {
 
   const trimWindow = (list, t) => list.filter((ts) => t - ts < opts.windowMs);
 
-  /** Whether a login attempt from this address may run the password check at all. */
+  /** Global pause or per-key lock currently in force for this key, or null. */
+  const blockFor = (key, t) => {
+    if (globalPausedUntil > t) return { reason: 'paused', retryAfterMs: globalPausedUntil - t };
+    const entry = entries.get(key);
+    if (entry && entry.lockedUntil > t) {
+      return { reason: 'locked', retryAfterMs: entry.lockedUntil - t };
+    }
+    return null;
+  };
+
+  /** Status query (reserves nothing): is this address currently locked or globally paused? */
   function check(ip) {
     const t = now();
     prune(t);
-    if (globalPausedUntil > t) return { allowed: false, retryAfterMs: globalPausedUntil - t };
-    const entry = entries.get(clientKey(ip));
-    if (entry && entry.lockedUntil > t) {
-      return { allowed: false, retryAfterMs: entry.lockedUntil - t };
-    }
+    const block = blockFor(clientKey(ip), t);
+    if (block) return { allowed: false, retryAfterMs: block.retryAfterMs };
     return { allowed: true, retryAfterMs: 0 };
+  }
+
+  /**
+   * Synchronously reserve the right to run one password check. Must be called before any
+   * await so concurrent requests cannot all pass the lock check before a failure is recorded.
+   * Only one attempt per client key and at most `maxConcurrentAttempts` overall run at once.
+   * On success the caller MUST call `release()` exactly when the attempt ends (use finally).
+   * @returns {{ ok: true, release: () => void }
+   *   | { ok: false, reason: 'locked' | 'paused' | 'busy', retryAfterSec: number }}
+   */
+  function beginAttempt(ip) {
+    const t = now();
+    prune(t);
+    const key = clientKey(ip);
+    const block = blockFor(key, t);
+    if (block) {
+      const retryAfterSec = Math.ceil(block.retryAfterMs / 1000);
+      return { ok: false, reason: block.reason, retryAfterSec };
+    }
+    if (inFlight.has(key) || inFlight.size >= opts.maxConcurrentAttempts) {
+      return { ok: false, reason: 'busy', retryAfterSec: 1 };
+    }
+    inFlight.add(key);
+    let released = false;
+    return {
+      ok: true,
+      release: () => {
+        if (released) return;
+        released = true;
+        inFlight.delete(key);
+      },
+    };
   }
 
   function recordFailure(ip) {
@@ -135,5 +178,12 @@ export function createLockout(options = {}) {
     if (entry) entry.failures = [];
   }
 
-  return { check, recordFailure, recordSuccess, size: () => entries.size };
+  return {
+    check,
+    beginAttempt,
+    recordFailure,
+    recordSuccess,
+    size: () => entries.size,
+    inFlight: () => inFlight.size,
+  };
 }

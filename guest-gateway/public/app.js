@@ -274,23 +274,47 @@ async function init() {
   }
 }
 
-$('login-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  $('login-error').textContent = '';
-  const res = await api('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: $('password').value }),
-  });
+async function submitLogin() {
+  let res;
+  try {
+    res = await api('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: $('password').value }),
+    });
+  } catch (err) {
+    if (err.message !== 'closed') {
+      $('login-error').textContent = '通信エラーです。電波の良い場所でもう一度お試しください。';
+    }
+    return;
+  }
   if (res.ok) {
     $('password').value = '';
     show('uploader');
     loadDiagnostics();
     requeueFailed('待機中(再ログイン後に再開)');
   } else if (res.status === 429) {
-    $('login-error').textContent = '試行回数が多すぎます。しばらく待ってから再度お試しください。';
+    const { error } = await res.json().catch(() => ({}));
+    $('login-error').textContent =
+      error === 'busy'
+        ? '処理中です。少し待ってからもう一度お試しください。'
+        : '試行回数が多すぎます。しばらく待ってから再度お試しください。';
   } else {
     $('login-error').textContent = '合言葉が違います。';
+  }
+}
+
+$('login-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  // One login request at a time; the server rejects overlapping attempts as 'busy'.
+  if (button.disabled) return;
+  button.disabled = true;
+  $('login-error').textContent = '';
+  try {
+    await submitLogin();
+  } finally {
+    button.disabled = false;
   }
 });
 
