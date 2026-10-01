@@ -233,7 +233,16 @@ export function createTusServer(config, { onReceived } = {}) {
       log('info', 'upload_finished', metrics);
       if (onReceived) {
         // Errors here surface as a 500 (guardHook) so the guest sees the upload as failed.
-        const importPath = await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
+        let importPath;
+        try {
+          importPath = await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
+        } catch (err) {
+          // A complete upload left in place would answer tus' retry HEAD with offset == length,
+          // and the client would report success for a file that is never imported. Drop it so
+          // the HEAD gets 404 and the client sends the file again.
+          await datastore.remove(upload.id).catch(() => {});
+          throw err;
+        }
         try {
           onReceived({
             uploadId: upload.id,

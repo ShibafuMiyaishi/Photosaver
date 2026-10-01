@@ -1,11 +1,19 @@
 // guest-gateway/public/app.js
 // ゲスト用画面: ニックネーム + 合言葉でログイン → tus で 1 件ずつアップロード(進捗・所要時間・速度を表示)
 // → 送信後はサーバー側の取り込み状態をポーリングし、アルバムに入ったかを表示する。
-// iOS は画面ロックやアプリ切替で通信が止まるため、画面に戻ったら失敗分を自動で再開する。
+// 通信の失敗は自動で再開する: 画面に戻ったとき(iOS は画面ロックやアプリ切替で通信が止まる)、
+// 電波が戻ったとき(オフラインの間は次の 1 件に進まず待つ)、画面を開いたままなら間隔を空けて。
+// 最初の読み込みに失敗したら「読み込めませんでした」と再読み込みボタンを出す。
 
 /* global tus */
 
 import { initGallery } from './gallery.js';
+import {
+  autoRetryDelay,
+  isPermanentFailure,
+  isTransientFailure,
+  MAX_AUTO_RETRIES,
+} from './upload-retry.js';
 
 const CSRF_HEADERS = { 'X-Requested-With': 'guest-gateway' };
 const CHUNK_SIZE = 50 * 1024 * 1024;
@@ -14,6 +22,9 @@ const POLL_INTERVAL_MS = 3000;
 // Must not exceed MAX_STATUS_IDS in src/app.js.
 const POLL_BATCH = 100;
 const NICKNAME_KEY = 'gw-nickname';
+// A request that hangs on a weak signal must not leave the page on 「読み込み中…」 forever.
+const SESSION_TIMEOUT_MS = 20_000;
+const SECTIONS = ['loading', 'load-error', 'login', 'uploader'];
 
 const $ = (id) => document.getElementById(id);
 const items = [];
@@ -28,6 +39,10 @@ let galleryEnabled = false;
 // sessionId changes on every login so the gallery knows its `mine` flags are stale.
 const permissions = { role: 'guest', canDelete: false, sessionId: 0 };
 let gallery = null;
+// Set when the server answered 401: the queue waits (instead of failing item after item)
+// until the guest has logged in again.
+let needsLogin = false;
+let initializing = false;
 
 function formatBytes(bytes) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
@@ -41,8 +56,44 @@ function formatSeconds(ms) {
 }
 
 function show(section) {
-  $('login').hidden = section !== 'login';
-  $('uploader').hidden = section !== 'uploader';
+  for (const id of SECTIONS) $(id).hidden = id !== section;
+}
+
+/** The session expired (401): ask for the password again; uploads wait until then. */
+function requireLogin() {
+  needsLogin = true;
+  show('login');
+}
+
+// Some in-app browsers / VPN setups report offline while the network works and never fire
+// 'online'. Once an upload makes progress while navigator.onLine says false, stop trusting it.
+let onLineUnreliable = false;
+// Set when an upload failed while offline: the queue then waits for 'online' (or 再試行)
+// instead of failing item after item. Starting is never blocked on navigator.onLine alone.
+let offlinePause = false;
+const OFFLINE_CHECK_MS = 10_000;
+
+let offlineCheckTimer = null;
+
+/** Backstop for a missed 'online' event: while paused, look again every few seconds. */
+function scheduleOfflineCheck() {
+  clearTimeout(offlineCheckTimer);
+  offlineCheckTimer = setTimeout(() => {
+    offlineCheckTimer = null;
+    if (!offlinePause) return;
+    if (isOffline()) scheduleOfflineCheck();
+    else requeueFailed('待機中(通信が戻ったので再開)');
+  }, OFFLINE_CHECK_MS);
+}
+
+/** navigator.onLine is only trustworthy when it says false (no network at all). */
+function isOffline() {
+  return !onLineUnreliable && navigator.onLine === false;
+}
+
+/** Called when an upload got through: the network works whatever navigator.onLine says. */
+function noteNetworkWorks() {
+  if (navigator.onLine === false) onLineUnreliable = true;
 }
 
 async function api(path, options = {}) {
@@ -115,11 +166,15 @@ function updateSummary() {
   const failed = count('error');
   const rejected = count('rejected');
   const adding = count('importing');
+  const waiting = items.some((i) => i.status === 'queued' || i.status === 'error');
   $('summary').textContent =
     `完了 ${count('done')} / ${items.length} 件` +
     (adding ? `(アルバムに追加中 ${adding} 件)` : '') +
     (failed ? `(失敗 ${failed} 件 — 再試行できます)` : '') +
-    (rejected ? `(受付不可 ${rejected} 件)` : '');
+    (rejected ? `(受付不可 ${rejected} 件)` : '') +
+    (waiting && offlinePause && isOffline()
+      ? ' — 通信が切れています。電波が戻ると自動で再開します'
+      : '');
 }
 
 function showTab(name) {
@@ -128,7 +183,7 @@ function showTab(name) {
   $('tab-upload').setAttribute('aria-pressed', String(name === 'upload'));
   $('tab-gallery').setAttribute('aria-pressed', String(name === 'gallery'));
   if (name === 'gallery') {
-    gallery ??= initGallery(api, { onUnauthorized: () => show('login') });
+    gallery ??= initGallery(api, { onUnauthorized: requireLogin });
     gallery.setPermissions({ ...permissions });
     gallery.show();
   }
@@ -211,7 +266,7 @@ async function pollImports() {
   try {
     const res = await api(`/api/uploads?ids=${waiting.map(encodeURIComponent).join(',')}`);
     if (res.status === 401) {
-      show('login');
+      requireLogin();
       return;
     }
     if (res.ok) {
@@ -233,19 +288,20 @@ async function pollImports() {
 
 // --- Upload ---
 
-// Failures that re-sending the same file cannot fix (refused by the server).
-// 401 → re-login, 409/423 → offset/lock conflicts, 5xx/network → transient: all retryable.
-function isPermanentFailure(status) {
-  if (status === 507) return true;
-  if (!status || status < 400 || status >= 500) return false;
-  return ![401, 409, 423].includes(status);
-}
-
 function rejectedText(status) {
   if (status === 507) return '受付不可(507)— サーバーの保存容量が不足しています';
   if (status === 413) return '受付不可(413)— ファイルが大きすぎます';
   if (status === 415) return '受付不可(415)— 対応していない形式のファイルです';
   return `受付不可(${status})— このファイルはサーバーに受け付けられませんでした`;
+}
+
+function failedText(item) {
+  const head = `失敗(${item.lastStatus ?? '通信エラー'})— `;
+  if (item.lastStatus === 401) return `${head}もう一度ログインすると再開します`;
+  if (isOffline()) return `${head}電波が戻ると自動で再開します`;
+  if (item.retryTimer)
+    return `${head}約${Math.round(item.retryDelay / 1000)}秒後に自動で再試行します`;
+  return `${head}「再試行」を押すとやり直します(画面を開き直したときも再開します)`;
 }
 
 function speedText(item, bytesSent) {
@@ -267,8 +323,15 @@ function createUpload(item) {
       lastModified: String(item.file.lastModified),
     },
     // Re-selecting the same file after a reload should resume, so avoid volatile fields.
-    fingerprint: async (file) => ['gw', file.name, file.size].join(':'),
+    // lastModified too: iOS can name different photos alike (e.g. image.jpg).
+    fingerprint: async (file) => ['gw', file.name, file.size, file.lastModified].join(':'),
     removeFingerprintOnSuccess: true,
+    // tus' default gives up at once while navigator.onLine is false, so one Wi-Fi blip failed
+    // the whole queue. Same status rules without that check: RETRY_DELAYS ride out about a
+    // minute offline; after that the item fails and the queue waits for 'online'.
+    onShouldRetry: (err) => isTransientFailure(err.originalResponse?.getStatus?.()),
+    // A chunk the server confirmed proves the network works (see noteNetworkWorks).
+    onChunkComplete: noteNetworkWorks,
     onProgress(bytesSent, bytesTotal) {
       if (item.startOffset === null) item.startOffset = bytesSent;
       item.el.bar.value = bytesTotal ? (bytesSent / bytesTotal) * 100 : 0;
@@ -278,6 +341,7 @@ function createUpload(item) {
       );
     },
     onSuccess({ lastResponse }) {
+      noteNetworkWorks();
       item.el.bar.value = 100;
       if (importing) {
         item.status = 'importing';
@@ -298,15 +362,19 @@ function createUpload(item) {
         releaseWakeLock();
         return;
       }
-      if (status === 401) {
-        show('login');
-      }
+      item.lastStatus = status;
       if (isPermanentFailure(status)) {
         item.status = 'rejected';
         updateItem(item, rejectedText(status));
       } else {
         item.status = 'error';
-        updateItem(item, `失敗(${status ?? '通信エラー'})— 画面に戻ると自動で再開します`);
+        if (status === 401) requireLogin();
+        // Offline: no per-item timer; pause the queue until 'online', 再試行 or the 10 s check.
+        else if (isOffline()) {
+          offlinePause = true;
+          scheduleOfflineCheck();
+        } else scheduleAutoRetry(item);
+        updateItem(item, failedText(item));
       }
       finish();
     },
@@ -338,6 +406,13 @@ function finish() {
 
 function next() {
   if (active) return;
+  if (offlinePause && !isOffline()) offlinePause = false;
+  // Paused rather than failing item after item: 'online' / a new login continue the queue.
+  // The wake lock stays on while the guest waits with queued items.
+  if (offlinePause || needsLogin) {
+    updateSummary();
+    return;
+  }
   const item = items.find((i) => i.status === 'queued');
   if (item) {
     start(item);
@@ -346,19 +421,52 @@ function next() {
   }
 }
 
+function requeue(item, label) {
+  clearTimeout(item.retryTimer);
+  item.retryTimer = null;
+  // A fresh tus.Upload: the old one has used up its retryDelays (tus resets them only after
+  // progress), so restarting it would give up after a single attempt. start() resumes the new
+  // one from the server's offset via the stored fingerprint (findPreviousUploads).
+  item.upload = null;
+  item.status = 'queued';
+  updateItem(item, label);
+}
+
+/** While the page stays visible, re-queue a transient failure by itself after a pause. */
+function scheduleAutoRetry(item) {
+  clearTimeout(item.retryTimer);
+  item.retryTimer = null;
+  if (!isTransientFailure(item.lastStatus) || item.autoRetries >= MAX_AUTO_RETRIES) return;
+  item.retryDelay = autoRetryDelay(item.autoRetries);
+  item.retryTimer = setTimeout(() => {
+    item.retryTimer = null;
+    if (item.status !== 'error') return;
+    // Hidden, offline or logged out: visibilitychange / 'online' / the login re-queue it.
+    if (document.visibilityState !== 'visible' || isOffline() || needsLogin) {
+      updateItem(item, failedText(item));
+      return;
+    }
+    item.autoRetries += 1;
+    requeue(item, '待機中(自動で再試行)');
+    next();
+  }, item.retryDelay);
+}
+
 function retry(item) {
   if (item.status !== 'error') return;
-  item.status = 'queued';
-  updateItem(item, '待機中');
+  item.autoRetries = 0;
+  requeue(item, '待機中');
+  // The guest pressed 再試行: try even if navigator.onLine says offline (it can be wrong).
+  offlinePause = false;
   next();
 }
 
+/** Something changed for the better (screen back, network back, logged in): retry all now. */
 function requeueFailed(label) {
   for (const item of items) {
-    if (item.status === 'error') {
-      item.status = 'queued';
-      updateItem(item, label);
-    }
+    if (item.status !== 'error') continue;
+    item.autoRetries = 0;
+    requeue(item, label);
   }
   next();
 }
@@ -373,6 +481,11 @@ function addFiles(fileList) {
       uploadId: null,
       startedAt: 0,
       startOffset: null,
+      // Status of the last failure (undefined = network error) and automatic retry state.
+      lastStatus: undefined,
+      autoRetries: 0,
+      retryTimer: null,
+      retryDelay: 0,
     };
     items.push(item);
     renderItem(item);
@@ -397,30 +510,75 @@ async function loadDiagnostics() {
   }
 }
 
-async function init() {
-  const res = await api('/api/session');
-  const {
-    authenticated,
-    nickname,
-    closesAt,
-    importing: importEnabled,
-    gallery: galleryOn,
-    role,
-    canDelete,
-  } = await res.json();
-  importing = Boolean(importEnabled);
-  galleryEnabled = Boolean(galleryOn);
-  permissions.role = role ?? 'guest';
-  permissions.canDelete = Boolean(canDelete);
-  $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
-  if (authenticated) {
-    setGreeting(nickname);
-    enterApp();
-    loadDiagnostics();
-  } else {
-    $('nickname').value = recallNickname();
-    show('login');
+async function fetchSession() {
+  // AbortSignal.timeout is missing before Safari 16: fall back to a timer.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SESSION_TIMEOUT_MS);
+  try {
+    const res = await api('/api/session', { signal: controller.signal });
+    if (!res.ok) throw new Error(`session: HTTP ${res.status}`);
+    // A captive portal or proxy page is not JSON: res.json() throws.
+    const session = await res.json();
+    if (!session || typeof session !== 'object') throw new Error('session: unexpected body');
+    return session;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/** Never rejects: a failure shows the 「読み込めませんでした」 screen with a retry button. */
+async function init() {
+  if (initializing) return;
+  initializing = true;
+  // Kept as a reference: a closed event replaces the whole page meanwhile.
+  const retryButton = $('load-retry');
+  retryButton.disabled = true;
+  show('loading');
+  try {
+    let session;
+    try {
+      session = await fetchSession();
+    } catch (err) {
+      // 'closed': api() has already replaced the page with the closed notice.
+      if (err.message !== 'closed') show('load-error');
+      return;
+    }
+    const {
+      authenticated,
+      nickname,
+      closesAt,
+      importing: importEnabled,
+      gallery: galleryOn,
+      role,
+      canDelete,
+    } = session;
+    importing = Boolean(importEnabled);
+    galleryEnabled = Boolean(galleryOn);
+    permissions.role = role ?? 'guest';
+    permissions.canDelete = Boolean(canDelete);
+    $('closes-at').textContent = `受付期限: ${new Date(closesAt).toLocaleString('ja-JP')}`;
+    if (authenticated) {
+      needsLogin = false;
+      setGreeting(nickname);
+      enterApp();
+      loadDiagnostics();
+    } else {
+      $('nickname').value = recallNickname();
+      show('login');
+    }
+  } finally {
+    initializing = false;
+    retryButton.disabled = false;
+  }
+}
+
+/** Login failures other than 400/401/429 (410 = closed is handled by api()). */
+function loginFailureText(status) {
+  if (status === 408 || status >= 500) {
+    return `通信エラーです(${status})。電波の良い場所で、少し待ってからもう一度お試しください。`;
+  }
+  if (status === 403) return 'ページを再読み込みしてから、もう一度お試しください。';
+  return `ログインできませんでした(${status})。もう一度お試しください。`;
 }
 
 async function submitLogin() {
@@ -448,7 +606,10 @@ async function submitLogin() {
     enterApp();
     loadDiagnostics();
     settleOrphanedImports();
+    needsLogin = false;
     requeueFailed('待機中(再ログイン後に再開)');
+  } else if (res.status === 401) {
+    $('login-error').textContent = '合言葉が違います。';
   } else if (res.status === 429) {
     const { error } = await res.json().catch(() => ({}));
     $('login-error').textContent =
@@ -462,7 +623,7 @@ async function submitLogin() {
         ? 'ニックネームは1〜20文字で入力してください。'
         : '入力内容を確認してください。';
   } else {
-    $('login-error').textContent = '合言葉が違います。';
+    $('login-error').textContent = loginFailureText(res.status);
   }
 }
 
@@ -488,12 +649,34 @@ $('files').addEventListener('change', (event) => {
   event.target.value = '';
 });
 
+$('load-retry').addEventListener('click', () => init());
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
+  // The closed page replaces the body, so the element may be gone.
+  if ($('load-error')?.hidden === false) {
+    init();
+    return;
+  }
   if (active) acquireWakeLock();
   // Uploads that died while the screen was off resume from the last confirmed offset.
   requeueFailed('待機中(再開)');
   schedulePoll();
 });
 
-init().catch(() => {});
+window.addEventListener('online', () => {
+  // The closed page replaces the body, so the element may be gone.
+  if ($('load-error')?.hidden === false) {
+    init();
+    return;
+  }
+  // Also starts the items that were left queued while offline.
+  offlinePause = false;
+  requeueFailed('待機中(通信が戻ったので再開)');
+  schedulePoll();
+});
+
+window.addEventListener('offline', updateSummary);
+
+// Fire-and-forget: init() never rejects (failures show the load-error screen).
+init();
