@@ -847,7 +847,15 @@ async function submitLogin() {
         headers: { 'Content-Type': 'application/json' },
         body,
       });
-      if (res.status !== 429 || (await loginErrorCode(res)) !== 'busy') break;
+      // 429 busy: another check from this address is running. 503 unavailable: the password
+      // check itself failed (e.g. memory pressure) and was not counted. Both clear up shortly.
+      const code = res.status === 429 || res.status === 503 ? await loginErrorCode(res) : null;
+      if (
+        !(res.status === 429 && code === 'busy') &&
+        !(res.status === 503 && code === 'unavailable')
+      ) {
+        break;
+      }
       const delay = loginBusyDelay({
         retry,
         elapsedMs: performance.now() - startedAt,

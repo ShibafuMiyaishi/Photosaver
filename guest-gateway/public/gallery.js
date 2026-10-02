@@ -339,9 +339,12 @@ function initialNote(asset) {
 }
 
 function canDeleteAsset(asset) {
+  // Without the delete key the server answers every DELETE with 404, which the page would
+  // take for "already gone" and report as deleted.
+  if (!permissions.canDelete) return false;
   // The server decides per asset (`deletable`); older servers leave it out.
   if (typeof asset.deletable === 'boolean') return asset.deletable;
-  return permissions.canDelete && (asset.mine || permissions.role === 'admin');
+  return asset.mine || permissions.role === 'admin';
 }
 
 // Ids deleted in this session: hidden from every listing, including one that was already in
