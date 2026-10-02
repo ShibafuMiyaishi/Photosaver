@@ -129,7 +129,7 @@ sudo btrfs scrub status /mnt/photo             # 直近 scrub でエラー 0?
 sudo smartctl -H /dev/sda                      # HDD の SMART 健康状態
 ls -lt /srv/photosaver/db-dumps | head -3      # DB ダンプミラーが更新されてる?
 tail -3 /var/tmp/photosaver-dbsync.log         # ミラーの直近結果(ERROR なら HDD かダンプを確認)
-systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount   # Docker が HDD マウント後に起動する設定が生きてる?
+systemctl show docker -p After --value | tr ' ' '\n' | grep -x mnt-photo.mount   # Docker が HDD マウント後に起動する設定が生きてる?
 ```
 
 scrub がエラーを報告した場合: 該当ファイルは壊れている(修復用の複製は無い)。

@@ -167,7 +167,7 @@ and `docs/operations.md`.
    sudo systemctl daemon-reload
    ```
    Do NOT restart Docker (the drop-in takes effect at the next boot). Do not touch `/etc/fstab`.
-5. Verify: `systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount` prints one line,
+5. Verify: `systemctl show docker -p After --value | tr ' ' '\n' | grep -x mnt-photo.mount` prints one line,
    `systemctl cat docker` shows the drop-in at the end, and `docker compose -f /srv/photosaver/docker-compose.yml ps`
    still shows every Immich service healthy.
    Optional, only if the user wants it now (Immich is offline for a few minutes): `sudo reboot`, then

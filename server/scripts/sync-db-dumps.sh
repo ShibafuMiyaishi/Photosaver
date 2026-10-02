@@ -36,5 +36,6 @@ shopt -u nullglob
 [ "${#dumps[@]}" -gt 0 ] || fail "no immich-db-backup-*.sql.gz in $SRC"
 
 mkdir -p "$DEST"
-rsync -a --delete "$SRC/" "$DEST/"
+# 作成中の .tmp は控えに含めない(件数表示とも一致させる)
+rsync -a --delete --exclude='*.tmp' "$SRC/" "$DEST/"
 echo "[sync-db-dumps] $(date -Iseconds) synced ${#dumps[@]} dump(s) -> $DEST"

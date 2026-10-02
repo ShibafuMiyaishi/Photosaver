@@ -164,7 +164,7 @@ systemd-escape -p --suffix=mount /mnt/photo     # → mnt-photo.mount(fstab か�
 sudo mkdir -p /etc/systemd/system/docker.service.d
 printf '[Unit]\nAfter=mnt-photo.mount\n' | sudo tee /etc/systemd/system/docker.service.d/photosaver-mount.conf
 sudo systemctl daemon-reload                    # Docker の再起動は不要(次回起動から効く)
-systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount   # 1 行出れば OK
+systemctl show docker -p After --value | tr ' ' '\n' | grep -x mnt-photo.mount   # 1 行出れば OK
 ```
 
 - `After=` は**順序だけ**の指定。起動時に `mnt-photo.mount` のマウント処理が走っていれば、それが
@@ -305,7 +305,7 @@ crontab -e
 ## 11. 完成チェックリスト
 
 - [ ] 再起動テスト: `sudo reboot` 後、何も操作せず Immich にアクセスできる
-- [ ] Docker が HDD マウントの後に起動する設定: `systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount` が 1 行出る(手順 6)
+- [ ] Docker が HDD マウントの後に起動する設定: `systemctl show docker -p After --value | tr ' ' '\n' | grep -x mnt-photo.mount` が 1 行出る(手順 6)
 - [ ] マーカー 2 つが存在する: `ls -la /mnt/photo/.photosaver.mount-ok /mnt/photo/immich-library/.photosaver.mount-ok`
 - [ ] HDD 抜きテスト: `docker compose down` → `sudo umount /mnt/photo` → `docker compose up -d` で
   `docker compose logs mount-guard` に `FATAL: photo drive not mounted` が出て immich-server が起動しない
