@@ -48,7 +48,7 @@ Funnel で外に出るのは窓口ノードだけで、Immich(本体の 443 serv
 | Immich(`v3` メタタグでメジャー固定、公式イメージを無改造) | 写真管理のすべて。マルチユーザー、クォータ、共有アルバム、ML 検索 |
 | Tailscale(node sharing) | 認証済みデバイスだけに到達性を与える。Immich に公開 URL は存在しない |
 | tailscale serve(ホスト) | HTTPS 終端(ts.net の正規証明書)→ localhost:2283 |
-| mount-guard(compose 内) | `${UPLOAD_LOCATION}` 直下のマーカーを確認し、HDD 未マウント時の「空ディレクトリへの書き込み事故」を防ぐ |
+| mount-guard(compose 内) | `${UPLOAD_LOCATION}` 直下のマーカーを確認し、HDD 未マウント時の「空ディレクトリへの書き込み事故」を防ぐ。走るのは `docker compose up` のときだけで、OS 起動時の自動再起動では走らない(そちらは Docker を HDD マウント後に起動させる systemd drop-in と、Immich 自身の起動時フォルダチェックが補う) |
 | guest-gateway(イベント時のみ) | ゲストの合言葉ログイン、tus による再開可能アップロード、1 アルバムへの取り込み・閲覧・保存・削除。期限で自動終了([guest-gateway.md](guest-gateway.md)) |
 | ts サイドカー(`tag:wedding-gw`) | 窓口専用の Tailscale ノード。Funnel の HTTPS 終端 → 窓口(127.0.0.1:8080) |
 | `photosaver_gw` ネットワーク | 窓口から immich-server の API だけに届く内部ネットワーク(外部への出口なし) |
