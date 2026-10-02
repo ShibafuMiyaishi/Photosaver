@@ -11,6 +11,7 @@
 /* global tus */
 
 import { initGallery } from './gallery.js';
+import { loginBusyDelay } from './login-retry.js';
 import {
   autoRetryDelay,
   canReadFile,
@@ -63,6 +64,10 @@ let initializing = false;
 // Set once the server answered 410: nothing may be scheduled any more.
 let closed = false;
 let stallTimer = null;
+// Set when the page was hidden (or frozen) at any time since the last stall check: iOS can
+// freeze the page right after hiding it, and on resume a pending check may run before the
+// visibilitychange handler has restarted the activity clock.
+let hiddenSinceStallCheck = false;
 
 function formatBytes(bytes) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
@@ -251,7 +256,8 @@ function enterApp() {
 }
 
 function setGreeting(nickname) {
-  const admin = permissions.role === 'admin' ? '(管理者モード: すべての写真を削除できます)' : '';
+  const admin =
+    permissions.role === 'admin' ? '(管理者モード: このページから上がった写真を削除できます)' : '';
   $('greeting').textContent = nickname ? `${nickname} さん、ようこそ${admin}` : '';
 }
 
@@ -387,14 +393,20 @@ function noteActivity(item) {
   item.lastActivity = performance.now();
 }
 
-/** Look at the file once more after a network-type error; sets item.unreadable. */
+/**
+ * Look at the file once more after a network-type error; sets item.unreadable. A probe that
+ * finishes after the guest picked the file again (replaceFile) leaves the item alone.
+ */
 function probeFile(item) {
-  item.probing ??= canReadFile(item.file).then((ok) => {
-    item.probing = null;
-    if (!ok) item.unreadable = true;
+  if (item.probing) return item.probing;
+  const file = item.file;
+  const probing = canReadFile(file).then((ok) => {
+    if (item.probing === probing) item.probing = null;
+    if (item.file === file) item.unreadable = !ok;
     return ok;
   });
-  return item.probing;
+  item.probing = probing;
+  return probing;
 }
 
 function createUpload(item) {
@@ -525,8 +537,11 @@ function checkStall() {
   const item = active;
   if (!item || closed || item.status !== 'uploading') return;
   const now = performance.now();
+  const wasHidden = hiddenSinceStallCheck || document.visibilityState !== 'visible';
+  // Still hidden: the next check must not count this interval either.
+  hiddenSinceStallCheck = document.visibilityState !== 'visible';
   // iOS stops the page (and its sockets) while hidden: that is not a stall.
-  if (document.visibilityState !== 'visible') item.lastActivity = now;
+  if (wasHidden) item.lastActivity = now;
   else if (now - item.lastActivity >= STALL_TIMEOUT_MS) {
     abortStalled(item);
     return;
@@ -716,7 +731,9 @@ function addFiles(fileList) {
     updateItem(item, '待機中');
   }
   $('pick-note').textContent =
-    skipped > 0 ? `同じファイルが送信待ち・送信中のため、${skipped} 件は追加しませんでした` : '';
+    skipped > 0
+      ? `同じファイルが送信待ち・送信中・追加中のため、${skipped} 件は追加しませんでした`
+      : '';
   updateSummary();
   next();
 }
@@ -807,10 +824,9 @@ function loginFailureText(status) {
   return `ログインできませんでした(${status})。もう一度お試しください。`;
 }
 
-// The server runs one password check per address at a time (scrypt takes ~0.3 s), so guests
-// sharing the venue Wi-Fi often get 429 'busy' in a rush. Retry those quietly a few times.
-const LOGIN_BUSY_RETRIES = 5;
-
+// The server runs only a few password checks per address at a time (scrypt takes ~0.3 s), so
+// guests sharing the venue Wi-Fi often get 429 'busy' in a rush. Retry those quietly for a while
+// (timing in login-retry.js); the original form values are sent each time.
 /** Read the 429 error code without consuming the response for later readers. */
 async function loginErrorCode(res) {
   const { error } = await res
@@ -823,19 +839,24 @@ async function loginErrorCode(res) {
 async function submitLogin() {
   let res;
   const body = JSON.stringify({ nickname: $('nickname').value, password: $('password').value });
+  const startedAt = performance.now();
   try {
-    for (let attempt = 0; ; attempt += 1) {
+    for (let retry = 1; ; retry += 1) {
       res = await api('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
       });
-      if (res.status !== 429 || attempt >= LOGIN_BUSY_RETRIES) break;
-      if ((await loginErrorCode(res)) !== 'busy') break;
-      $('login-error').textContent = '混み合っています。自動でもう一度試しています…';
-      const retryAfterSec = Number(res.headers.get('Retry-After')) || 1;
+      if (res.status !== 429 || (await loginErrorCode(res)) !== 'busy') break;
+      const delay = loginBusyDelay({
+        retry,
+        elapsedMs: performance.now() - startedAt,
+        retryAfter: res.headers.get('Retry-After'),
+      });
+      if (delay === null) break;
+      $('login-error').textContent = `混み合っています。自動でもう一度試しています…(${retry} 回目)`;
       await new Promise((resolve) => {
-        setTimeout(resolve, retryAfterSec * 1000 + Math.random() * 1000);
+        setTimeout(resolve, delay);
       });
     }
   } catch (err) {
@@ -904,7 +925,16 @@ $('files').addEventListener('change', (event) => {
 
 $('load-retry').addEventListener('click', () => init());
 
+function noteHidden() {
+  hiddenSinceStallCheck = true;
+}
+
+window.addEventListener('pagehide', noteHidden);
+// Page Lifecycle API (Chromium); other browsers never fire it.
+document.addEventListener('freeze', noteHidden);
+
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') noteHidden();
   if (closed || document.visibilityState !== 'visible') return;
   if ($('load-error').hidden === false) {
     init();
