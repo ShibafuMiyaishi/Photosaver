@@ -145,6 +145,93 @@ describe('createLockout', () => {
     expect(lockout.check('198.51.100.1').allowed).toBe(true);
   });
 
+  /** 300 failures from untrusted addresses: trips the global pause. */
+  function tripGlobalPause(lockout) {
+    for (let i = 0; i < 300; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+  }
+
+  it('lets a key that logged in within 24 hours through the global pause', () => {
+    const { clock, lockout } = setup();
+    lockout.recordSuccess('203.0.113.7');
+    clock.advance(HOUR);
+    tripGlobalPause(lockout);
+    // Untrusted addresses stay paused, with the same reason as before.
+    expect(lockout.check('192.0.2.1')).toEqual({ allowed: false, retryAfterMs: 5 * MIN });
+    expect(lockout.beginAttempt('192.0.2.1')).toMatchObject({ ok: false, reason: 'paused' });
+    // The venue address (and any IPv4-mapped form of it) is not.
+    expect(lockout.check('203.0.113.7')).toEqual({ allowed: true, retryAfterMs: 0 });
+    const attempt = lockout.beginAttempt('::ffff:203.0.113.7');
+    expect(attempt.ok).toBe(true);
+    attempt.release();
+  });
+
+  it('still locks a trusted key on its own failures', () => {
+    const { lockout } = setup();
+    lockout.recordSuccess('203.0.113.7');
+    fail(lockout, '203.0.113.7', 20);
+    expect(lockout.check('203.0.113.7')).toEqual({ allowed: false, retryAfterMs: 2 * MIN });
+    expect(lockout.beginAttempt('203.0.113.7')).toMatchObject({ ok: false, reason: 'locked' });
+  });
+
+  it('does not count failures from trusted keys toward the global pause', () => {
+    const { clock, lockout } = setup();
+    lockout.recordSuccess('203.0.113.7');
+    // 600 typos from the trusted venue address (with successes in between, as guests retry).
+    for (let i = 0; i < 600; i += 1) {
+      lockout.recordFailure('203.0.113.7');
+      if (i % 10 === 9) lockout.recordSuccess('203.0.113.7');
+      clock.advance(1_000);
+    }
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('login_global_pause'));
+    expect(lockout.check('192.0.2.1').allowed).toBe(true);
+    // Only untrusted failures count: 299 more do not pause, the 300th does.
+    for (let i = 0; i < 299; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+    expect(lockout.check('192.0.2.1').allowed).toBe(true);
+    lockout.recordFailure('198.51.100.250');
+    expect(lockout.check('192.0.2.1').allowed).toBe(false);
+  });
+
+  it('forgets trust 24 hours after the last successful login', () => {
+    const { clock, lockout } = setup();
+    lockout.recordSuccess('203.0.113.7');
+    clock.advance(23 * HOUR);
+    lockout.recordSuccess('203.0.113.7'); // refreshes trust
+    clock.advance(24 * HOUR - 1);
+    tripGlobalPause(lockout);
+    expect(lockout.check('203.0.113.7').allowed).toBe(true);
+    clock.advance(1);
+    expect(lockout.check('203.0.113.7')).toEqual({ allowed: false, retryAfterMs: 5 * MIN - 1 });
+    // Pruning (at most once a minute) drops the expired trust.
+    clock.advance(MIN);
+    lockout.check('192.0.2.1');
+    expect(lockout.trustedSize()).toBe(0);
+  });
+
+  it('never lets failures from many addresses evict trusted keys', () => {
+    const { lockout } = setup({ maxKeys: 3 });
+    lockout.recordSuccess('203.0.113.7');
+    lockout.recordFailure('203.0.113.7');
+    tripGlobalPause(lockout); // 300 distinct addresses, far beyond maxKeys
+    expect(lockout.size()).toBe(3);
+    expect(lockout.trustedSize()).toBe(1);
+    expect(lockout.check('203.0.113.7').allowed).toBe(true);
+  });
+
+  it('caps trusted keys by dropping the oldest success first', () => {
+    const { clock, lockout } = setup({ maxKeys: 2 });
+    lockout.recordSuccess('192.0.2.1');
+    clock.advance(1_000);
+    lockout.recordSuccess('192.0.2.2');
+    clock.advance(1_000);
+    lockout.recordSuccess('192.0.2.1'); // refreshed: now the newest
+    lockout.recordSuccess('192.0.2.3'); // evicts 192.0.2.2
+    expect(lockout.trustedSize()).toBe(2);
+    tripGlobalPause(lockout);
+    expect(lockout.check('192.0.2.1').allowed).toBe(true);
+    expect(lockout.check('192.0.2.3').allowed).toBe(true);
+    expect(lockout.check('192.0.2.2').allowed).toBe(false);
+  });
+
   it('keeps memory bounded by dropping the oldest addresses', () => {
     const { lockout } = setup({ maxKeys: 3 });
     lockout.recordFailure('192.0.2.1');
@@ -205,9 +292,9 @@ describe('beginAttempt', () => {
     expect(lockout.inFlight()).toBe(0);
   });
 
-  it('defaults to 8 concurrent attempts', () => {
+  it('defaults to 4 concurrent attempts (scrypt N=2^17 needs ~128 MiB each)', () => {
     const { lockout } = setup();
-    const held = Array.from({ length: 8 }, (_, i) => lockout.beginAttempt(`192.0.2.${i}`));
+    const held = Array.from({ length: 4 }, (_, i) => lockout.beginAttempt(`192.0.2.${i}`));
     expect(held.every((a) => a.ok)).toBe(true);
     expect(lockout.beginAttempt('192.0.2.100').reason).toBe('busy');
     for (const a of held) a.release();

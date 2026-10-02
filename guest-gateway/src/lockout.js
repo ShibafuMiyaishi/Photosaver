@@ -1,5 +1,6 @@
 // guest-gateway/src/lockout.js
 // 合言葉ログインの総当たり対策。IP(IPv6 は /64 単位)ごとの段階的ロックと、全体の一時停止(メモリ上)。
+// 24 時間以内にログインに成功したアドレス(会場 Wi-Fi など)は「信頼済み」として全体停止の対象外にする。
 
 import net from 'node:net';
 import { log } from './log.js';
@@ -11,6 +12,15 @@ const HOUR_MS = 60 * MINUTE_MS;
 // typos from everyone there add up on one key, and a lock hits them all. The shared password
 // only opens a guest album; scrypt, one check in flight per key, the doubling lock and the
 // global pause still bound guessing (per key roughly 20 tries per hour once the lock is capped).
+//
+// Trusted keys: a client key with a correct password within `levelResetMs` (24 h) is trusted.
+// It bypasses the global pause and its failures do not feed the global window, so an attacker
+// who trips the pause from other addresses (a few IPv4s, IPv6 /64 rotation) cannot keep the
+// venue — or any guest who already got in once — locked out for the whole event. Trusted keys
+// keep the normal per-key counting and doubling lock. Only untrusted keys are paused, which
+// still bounds distributed guessing from addresses that never knew the password.
+// Trust lives in memory only and is lost on restart: after a restart the organiser should log
+// in once from the venue Wi-Fi again (and before guests arrive in the first place).
 // maxFailures / baseLockMs can be tuned without code changes (LOGIN_MAX_FAILURES /
 // LOGIN_LOCK_MINUTES, see config.js).
 export const LOCKOUT_DEFAULTS = {
@@ -19,16 +29,25 @@ export const LOCKOUT_DEFAULTS = {
   // 2, 4, 8, ... minutes, capped at an hour: a venue that trips it is back in minutes.
   baseLockMs: 2 * MINUTE_MS,
   maxLockMs: HOUR_MS,
+  // Also how long a successful login keeps its client key trusted (see above).
   levelResetMs: 24 * HOUR_MS,
-  // Pauses ALL logins, so honest traffic must never reach it: even 100+ guests arriving within
-  // 15 minutes with two typos each stay well below it (the old 100 did not). A distributed
-  // attack is still held to about 300 guesses per 15 minutes (the pause re-arms at once while
-  // the window is still full).
+  // Pauses logins from all UNTRUSTED keys, so honest traffic should never reach it: even 100+
+  // guests arriving within 15 minutes with two typos each stay well below it (the old 100 did
+  // not), and failures from trusted keys are not counted at all. A distributed attack from
+  // untrusted addresses is still held to about 300 guesses per 15 minutes (the pause re-arms at
+  // once while the window is still full).
   globalMaxFailures: 300,
   globalPauseMs: 5 * MINUTE_MS,
+  // Cap for failure entries and, separately, for trusted keys (only a correct password adds
+  // one, so failures can never push trusted keys out).
   maxKeys: 10_000,
   pruneIntervalMs: MINUTE_MS,
-  maxConcurrentAttempts: 8,
+  // scrypt N=2^17 needs ~128 MiB per check (auth.js), and libuv's default pool runs only 4
+  // at once anyway (more would just queue): 4 caps login memory at ~0.5 GiB on the 16 GB mini
+  // PC shared with Immich and still allows ~13 checks/s on an Apple M3 (4 in ~0.3 s; the mini
+  // PC is slower, estimated 5-10/s), plenty for guests arriving over minutes. Extra requests
+  // get 429 'busy' (Retry-After: 1) instead of queueing.
+  maxConcurrentAttempts: 4,
 };
 
 /** Expand an IPv6 address into 8 normalized hextets (no leading zeros). */
@@ -75,6 +94,11 @@ export function createLockout(options = {}) {
   // Client keys with a password check in flight. Kept apart from `entries` so pruning and
   // the key cap never drop it; its size is bounded by `maxConcurrentAttempts`.
   const inFlight = new Set();
+  // Client key → time of its last successful login (Map order: oldest success first). Kept
+  // apart from `entries` so failures from many addresses can never evict a trusted key.
+  // In memory only: a restart forgets it (see the comment on trusted keys above).
+  /** @type {Map<string, number>} */
+  const trusted = new Map();
   let globalFailures = [];
   let globalPausedUntil = 0;
   let lastPrune = 0;
@@ -85,19 +109,31 @@ export function createLockout(options = {}) {
     return entry.level > 0 ? idleMs >= opts.levelResetMs : idleMs >= opts.windowMs;
   };
 
+  const isTrusted = (key, t) => {
+    const since = trusted.get(key);
+    return since !== undefined && t - since < opts.levelResetMs;
+  };
+
   const prune = (t) => {
     if (t - lastPrune < opts.pruneIntervalMs) return;
     lastPrune = t;
     for (const [key, entry] of entries) {
       if (isExpired(entry, t)) entries.delete(key);
     }
+    for (const [key, since] of trusted) {
+      // Oldest first: stop at the first one still trusted.
+      if (t - since < opts.levelResetMs) break;
+      trusted.delete(key);
+    }
   };
 
   const trimWindow = (list, t) => list.filter((ts) => t - ts < opts.windowMs);
 
-  /** Global pause or per-key lock currently in force for this key, or null. */
+  /** Global pause (untrusted keys only) or per-key lock in force for this key, or null. */
   const blockFor = (key, t) => {
-    if (globalPausedUntil > t) return { reason: 'paused', retryAfterMs: globalPausedUntil - t };
+    if (globalPausedUntil > t && !isTrusted(key, t)) {
+      return { reason: 'paused', retryAfterMs: globalPausedUntil - t };
+    }
     const entry = entries.get(key);
     if (entry && entry.lockedUntil > t) {
       return { reason: 'locked', retryAfterMs: entry.lockedUntil - t };
@@ -105,7 +141,7 @@ export function createLockout(options = {}) {
     return null;
   };
 
-  /** Status query (reserves nothing): is this address currently locked or globally paused? */
+  /** Status query (reserves nothing): is this address locked, or paused while untrusted? */
   function check(ip) {
     const t = now();
     prune(t);
@@ -171,6 +207,9 @@ export function createLockout(options = {}) {
       log('warn', 'login_locked', { ip: key, lockMinutes: lockMs / MINUTE_MS, level: entry.level });
     }
 
+    // A trusted key (correct password within 24 h) is not part of a distributed guess, and its
+    // typos must not pause everyone else either.
+    if (isTrusted(key, t)) return;
     globalFailures = trimWindow(globalFailures, t);
     globalFailures.push(t);
     if (globalFailures.length > opts.globalMaxFailures) globalFailures.shift();
@@ -183,10 +222,19 @@ export function createLockout(options = {}) {
     }
   }
 
-  /** A correct password clears the failure count (the lock level is kept). */
+  /**
+   * A correct password clears the failure count (the lock level is kept) and makes the key
+   * trusted for `levelResetMs` from now.
+   */
   function recordSuccess(ip) {
-    const entry = entries.get(clientKey(ip));
+    const t = now();
+    const key = clientKey(ip);
+    const entry = entries.get(key);
     if (entry) entry.failures = [];
+    // Re-insert so Map order stays oldest success first (pruning and the cap rely on it).
+    if (trusted.has(key)) trusted.delete(key);
+    else if (trusted.size >= opts.maxKeys) trusted.delete(trusted.keys().next().value);
+    trusted.set(key, t);
   }
 
   return {
@@ -195,6 +243,7 @@ export function createLockout(options = {}) {
     recordFailure,
     recordSuccess,
     size: () => entries.size,
+    trustedSize: () => trusted.size,
     inFlight: () => inFlight.size,
   };
 }

@@ -73,7 +73,35 @@ describe('loadConfig', () => {
     ['non-numeric login failures', { LOGIN_MAX_FAILURES: 'many' }],
     ['negative lock minutes', { LOGIN_LOCK_MINUTES: '-1' }],
     ['lock longer than the cap', { LOGIN_LOCK_MINUTES: '61' }],
+    ['fractional proxy hops', { TRUST_PROXY_HOPS: '1.5' }],
+    ['zero proxy hops', { TRUST_PROXY_HOPS: '0' }],
+    ['non-numeric proxy hops', { TRUST_PROXY_HOPS: 'x' }],
   ])('rejects %s', (_label, override) => {
     expect(() => loadConfig({ ...VALID, ...override })).toThrow();
+  });
+
+  it('reads TRUST_PROXY_HOPS as a positive integer (default 1)', () => {
+    expect(loadConfig(VALID).trustProxyHops).toBe(1);
+    expect(loadConfig({ ...VALID, TRUST_PROXY_HOPS: '2' }).trustProxyHops).toBe(2);
+  });
+
+  it.each([
+    ['GUEST_PASSWORD_HASH', 'N above 2^20', 'scrypt:2097152:8:1:c2FsdA:aGFzaA'],
+    ['GUEST_PASSWORD_HASH', 'N not a power of 2', 'scrypt:100000:8:1:c2FsdA:aGFzaA'],
+    ['GUEST_PASSWORD_HASH', 'r above 32', 'scrypt:16384:33:1:c2FsdA:aGFzaA'],
+    ['GUEST_PASSWORD_HASH', 'p above 16', 'scrypt:16384:8:17:c2FsdA:aGFzaA'],
+    ['GUEST_PASSWORD_HASH', 'missing parts', 'scrypt:16384:8:1'],
+    ['ADMIN_PASSWORD_HASH', 'N above 2^20', 'scrypt:2097152:8:1:c2FsdA:aGFzaA'],
+  ])('rejects %s with %s', (name, _label, value) => {
+    expect(() => loadConfig({ ...VALID, [name]: value })).toThrow(
+      new RegExp(`^${name} is not a usable scrypt hash`),
+    );
+  });
+
+  it('accepts hashes with the old N=2^14 and the current N=2^17', () => {
+    const current = 'scrypt:131072:8:1:c2FsdA:aGFzaA';
+    const config = loadConfig({ ...VALID, ADMIN_PASSWORD_HASH: current });
+    expect(config.guestPasswordHash).toBe(VALID.GUEST_PASSWORD_HASH);
+    expect(config.adminPasswordHash).toBe(current);
   });
 });

@@ -295,7 +295,8 @@ export function createApp(config, { store, importer, immich } = {}) {
         maxAge: Math.max(0, config.closesAt - Date.now()),
       });
       log('info', 'login_ok', { device: shortHash(session.deviceId), role });
-      return res.json({ ok: true, role });
+      // The normalized nickname is what the session holds; the UI greets with it.
+      return res.json({ ok: true, role, nickname });
     } finally {
       attempt.release();
     }
