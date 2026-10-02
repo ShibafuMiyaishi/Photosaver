@@ -142,7 +142,12 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
    and skips an existing file). Fill in the remaining values in place: SESSION_SECRET
    (`openssl rand -hex 32`), GUEST_PASSWORD_HASH (via `docker run ... node scripts/hash-password.js`,
    the user types the password; never echo it), CLOSES_AT (ask the user; e.g. a few days after the
-   test). Keep the template defaults for GW_DATA_DIR / STAGING_DIR_HOST / MOUNT_MARKER_HOST unless
+   test). Build the image from the pulled code first (README step 3 does) so the hash gets the new
+   scrypt parameters (N=2^17; it must start with `scrypt:131072:`). If `.env` already holds a hash
+   made earlier (`scrypt:16384:`), it still works, but regenerate it now (recommended). Time one run
+   on the mini PC and put the duration in the report (docker startup included; expected ~0.3–0.5 s for
+   the hash itself): `read -rs P && time (printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js); unset P`.
+   The gateway refuses to start on a malformed hash or one outside N 2^14..2^20. Keep the template defaults for GW_DATA_DIR / STAGING_DIR_HOST / MOUNT_MARKER_HOST unless
    T1 showed different paths. Verify required keys without printing values:
    `grep -cE '^(TS_AUTHKEY|GW_DATA_DIR|STAGING_DIR_HOST|SESSION_SECRET|GUEST_PASSWORD_HASH|CLOSES_AT)=.+' .env` → 6,
    `grep -c 'CHANGE_ME' .env` → 0 (the template ships placeholder/default values, so the first
@@ -152,7 +157,8 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
 4. Validate first: `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env config -q`
    (never print the expanded config — it contains secrets). Then
    `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env up -d --build`,
-   then (from `~`, see the kill-switch note in item 8) `docker compose -p wedding-gw ps` (`guest_gateway` healthy, `guest_gateway_ts` Up — the sidecar has no healthcheck) and `docker compose -p wedding-gw logs --tail 50`.
+   then (see the kill-switch note in item 8) `cd ~ && docker compose -p wedding-gw ps` (`guest_gateway` healthy, `guest_gateway_ts` Up — the sidecar has no healthcheck) and `cd ~ && docker compose -p wedding-gw logs --tail 50`
+   (expect `staging_reconcile_done` before `listening`).
 5. Exposure checks (from a phone on mobile data, not Wi-Fi):
    - the public gateway URL loads and login works;
    - Immich is still NOT reachable from outside, and still reachable inside the tailnet;
@@ -163,14 +169,17 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
    - resume: screen lock, airplane mode on/off, Wi-Fi↔LTE switch mid-upload;
    - iOS behaviour: `detectedType` for photos (HEIC vs JPEG) and videos, whether videos shrink
      (compare the logged `size` with the size shown in Photos), `lastModified` shown on screen.
-     Only if the files themselves must be inspected: set `KEEP_UPLOADS=true` and restart
-     (files go to `staging/kept/`, see README), then set it back to `false`, restart, and delete
+     Only if the files themselves must be inspected: set `KEEP_UPLOADS=true` and recreate the gateway
+     (a restart does not reload `.env`): `docker compose -f /srv/photosaver/repo/guest-gateway/compose.yml --env-file /srv/photosaver/guest-gateway/.env up -d --no-deps --force-recreate guest-gateway`
+     (files go to `staging/kept/`, see README), then set it back to `false`, recreate the same way, and delete
      `/mnt/photo/guest-gateway/staging/kept/` right after the check;
    - the IP shown under 「計測情報」 for phones on mobile data and on one shared Wi-Fi
      (needed to decide the venue-NAT lockout policy). **Two phones on different networks must show
      different addresses** (tailscale v1.102 source: Funnel sets a single `X-Forwarded-For` with the
      client's address, which `trust proxy = 1` reads). If every phone shows the same address, report
-     it as a blocker: the per-IP login lockout would then be shared by all guests. Phones on one
+     it as a blocker: the per-IP login lockout, the login trust (24 h after a successful login), the
+     per-address media/ZIP limits and ZIP plan caps would then be shared by all guests (IPv6 addresses
+     in one /64 count as one address by design). Phones on one
      Wi-Fi showing one address is expected; the lockout defaults allow 20 failures / 15 min per
      address (2-min first lock) and can be tuned with `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES`
      in `.env` — recommend values in the report.
@@ -209,14 +218,24 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    any photo.
 4. Follow **「取り込みモードに切り替える」 → 「2. 窓口を作り直して確認」**: recreate `guest-gateway`, check the log shows `immich_ok`
    with version >= 3.2.4.
+   If `ADMIN_PASSWORD_HASH` / `GUEST_PASSWORD_HASH` still start with `scrypt:16384:`, regenerate them
+   now (new parameters, recommended) and recreate again — never print them.
 5. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
    the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,
-   and `docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
+   and `cd ~ && docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
    `docker exec guest_gateway node scripts/event-status.js` shows the counts with no ⚠️ line
    (report only that it ran cleanly, or the warning text — not the counts).
    Upload the same photo again → 「同じ写真が既にアルバムにあります」.
    Open 「みんなの写真」: view, play the video, save a photo (share sheet → Photos), delete the test
    photo (own upload); with the organiser password, delete the test video.
+   **Organiser vs Immich-app photos**: add one photo to the album from the Immich app (the user's own
+   account) and open it with the organiser password → no 削除 button (the gateway knows the album
+   owner; if the log shows `album_owner_unknown`, tapping 削除 shows 「この写真はここでは削除できません
+   (Immich アプリから追加された写真です)」 instead). Delete it in the Immich app afterwards.
+   **Re-login mid-upload** (there is no logout button; use a PC browser): while a large video is
+   sending, delete only the session cookie `__Host-gw` in the browser's devtools (keep localStorage)
+   → the page asks for the password → log in again → the file restarts from 0 and, once imported,
+   shows as the new login's own upload (削除 button present); the log shows `upload_device_mismatch`.
    **Bulk save** (「まとめて保存」; needs ~40 items incl. 2–3 videos in the album, one ≥ 600 MB if possible):
    - iPhone (Safari): 「準備する」 → 「写真アプリに保存」 → share sheet shows 「〇項目を保存」 (photo-only:
      「〇枚の画像を保存」) → items appear in Photos (videos too); the second batch follows; a video
@@ -232,6 +251,15 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    - PC: 「ZIP を作成」 → download → the ZIP opens and holds the album. If the album is > 2 GB, open a
      third part while two download → 「混み合っています」 page. Time a 2 GB part over the venue-like
      network (download speed over Funnel was not part of T3).
-6. Leave it running or stop it as the user prefers (kill switch: `cd ~ && docker compose -p wedding-gw down`).
+   - Memory constants: from the iPhone (Safari reload/crash while preparing?) and Android (tab killed,
+     downloads missing?) results, recommend values for `public/bulk.js` — iOS `SHARE_BATCH_BYTES`
+     300 MB / `SHARE_MAX_FILE_BYTES` 500 MB, Android `LIVE_BLOB_BUDGET_BYTES` 600 MB. Report only;
+     code changes go through the Mac/dev flow.
+6. Event-day login trust (tell the user; record in the report that it was explained): the login trust
+   for the venue address lives in memory only. On the event day the organiser (or the user) logs in
+   once **from the venue Wi-Fi** before guests arrive, and again after any gateway restart/recreate,
+   so a global login pause triggered from elsewhere cannot lock the venue out
+   (docs/guest-gateway.md 「ログインの総当たり対策」).
+7. Leave it running or stop it as the user prefers (kill switch: `cd ~ && docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.

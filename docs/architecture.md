@@ -75,7 +75,9 @@ Funnel で外に出るのは窓口ノードだけで、Immich(本体の 443 serv
   `asset.delete` 権限だけの API キー。漏れても影響はそのアルバム・そのユーザーの写真に限られる
 - **ネットワーク分離**: 窓口と Immich の接点は `photosaver_gw`(`internal: true`)だけ。
   参加するのは immich-server のみで、Redis・Postgres は決して参加させない
-  (`server/docker-compose.yml` 差分 5)。窓口が乗っ取られても届くのは Immich の API だけ
+  (`server/docker-compose.yml` 差分 5)。窓口が乗っ取られても、Immich 一式で届くのは API だけ
+  (Tailscale 用の出口からミニ PC のブリッジ側アドレスと自宅 LAN には届く。受け入れ済みのリスク。
+  [guest-gateway.md](guest-gateway.md) の「残るリスク」)
 - 止めるときは `cd ~ && docker compose -p wedding-gw down`。
   ⚠️ ミニ PC 本体で `tailscale funnel reset` / `serve reset` は使わない(Immich の tailnet 公開まで消える)
 - Funnel の帯域は非公開のため、実機で速度を測ってから採否を決める
