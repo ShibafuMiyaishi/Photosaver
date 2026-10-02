@@ -275,8 +275,8 @@ export function createApp(config, { store, importer, immich, lockoutOptions } = 
     }
     try {
       // Guest first: if both passwords were ever set to the same value, nobody becomes admin.
-      // The admin hash is skipped while too many logins fail overall (lockout.js "Admin
-      // guesses"): a guest-password holder must not get unlimited admin guesses.
+      // The admin hash is skipped while too many logins from trusted addresses fail (lockout.js
+      // "Admin guesses"): a guest-password holder must not get unlimited admin guesses.
       let role = null;
       try {
         if (await verifyPassword(password, config.guestPasswordHash)) role = 'guest';

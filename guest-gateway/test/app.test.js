@@ -297,7 +297,8 @@ describe('admin password under guessing', () => {
 
   it('stops checking the admin password while too many logins fail, guests unaffected', async () => {
     // A guest-password holder alternates a correct login (trusted key, failures cleared) with
-    // wrong guesses: never locked, but every failure feeds the admin-guess window.
+    // wrong guesses: never locked, but each failure from its trusted key feeds the admin-guess
+    // window.
     for (let round = 0; round < 2; round += 1) {
       expect((await login(srv.baseUrl)).res.status).toBe(200);
       for (let i = 0; i < 3; i += 1) {
@@ -317,6 +318,16 @@ describe('admin password under guessing', () => {
     const later = await login(srv.baseUrl, ADMIN_PASSWORD, '幹事');
     expect(await later.res.json()).toMatchObject({ ok: true, role: 'admin' });
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('admin_check_resumed'));
+  });
+
+  it('keeps checking the admin password when only untrusted clients fail', async () => {
+    // No guest login first: the address is untrusted, so its failures do not count.
+    for (let i = 0; i < 10; i += 1) {
+      expect((await login(srv.baseUrl, `anon-guess-${i}`)).res.status).toBe(401);
+    }
+    const admin = await login(srv.baseUrl, ADMIN_PASSWORD, '幹事');
+    expect(await admin.res.json()).toMatchObject({ ok: true, role: 'admin' });
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('admin_check_paused'));
   });
 });
 

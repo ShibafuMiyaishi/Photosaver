@@ -336,7 +336,7 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    (docs/guest-gateway.md 「ログインの総当たり対策」). There is no logout: on a phone that is already
    logged in, use a private/incognito tab. Any guest's successful login from the venue Wi-Fi also
    makes the address trusted. Also explain: the organiser password should be long/random, and while
-   ≥ 300 failed logins fall within 15 min the organiser password is refused like a wrong one
+   ≥ 300 failed logins from trusted addresses fall within 15 min the organiser password is refused like a wrong one
    (`admin_check_paused`) — wait for `admin_check_resumed`.
 7. Leave it running or stop it as the user prefers (kill switch: `cd ~ && docker compose -p wedding-gw down`).
 

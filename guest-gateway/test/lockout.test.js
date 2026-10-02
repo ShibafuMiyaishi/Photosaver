@@ -306,7 +306,7 @@ describe('admin guess window', () => {
     return adminChecks;
   }
 
-  it('pauses admin checks once 300 logins failed in 15 minutes, trusted keys included', () => {
+  it('pauses admin checks once 300 logins from trusted keys failed in 15 minutes', () => {
     const { clock, lockout } = setup();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     // 20 rounds = 380 wrong guesses, never locked (success clears the per-key count) and never
@@ -325,17 +325,33 @@ describe('admin guess window', () => {
     attempt.release();
   });
 
-  it('counts failures from every key and resumes once the window drops below the limit', () => {
+  it('never pauses admin checks for failures from untrusted keys alone', () => {
+    const { clock, lockout } = setup();
+    // 900 wrong guesses from 900 untrusted addresses over 45 minutes: the global pause trips
+    // (that is what bounds them), but the admin check stays on throughout.
+    for (let i = 0; i < 900; i += 1) {
+      lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+      expect(lockout.adminCheckAllowed()).toBe(true);
+      clock.advance(3000);
+    }
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('login_global_pause'));
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('admin_check_paused'));
+  });
+
+  it('counts failures from trusted keys only and resumes once the window drops below it', () => {
     const { clock, lockout } = setup();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     lockout.recordSuccess('203.0.113.7');
-    for (let i = 0; i < 150; i += 1) lockout.recordFailure('203.0.113.7'); // trusted
+    lockout.recordSuccess('203.0.113.8');
+    for (let i = 0; i < 150; i += 1) lockout.recordFailure('203.0.113.7');
     clock.advance(MIN);
-    for (let i = 0; i < 149; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+    // Untrusted failures in between do not count.
+    for (let i = 0; i < 200; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+    for (let i = 0; i < 149; i += 1) lockout.recordFailure('203.0.113.8');
     expect(lockout.adminCheckAllowed()).toBe(true);
-    lockout.recordFailure('198.51.100.250');
+    lockout.recordFailure('203.0.113.8');
     expect(lockout.adminCheckAllowed()).toBe(false);
-    // The 150 trusted failures leave the window 15 minutes after they happened.
+    // The first 150 trusted failures leave the window 15 minutes after they happened.
     clock.advance(14 * MIN - 1);
     expect(lockout.adminCheckAllowed()).toBe(false);
     clock.advance(1);
@@ -349,6 +365,7 @@ describe('admin guess window', () => {
 
   it('keeps the admin pause independent of successful logins', () => {
     const { lockout } = setup({ adminGuessLimit: 3 });
+    lockout.recordSuccess('192.0.2.1');
     fail(lockout, '192.0.2.1', 3);
     expect(lockout.adminCheckAllowed()).toBe(false);
     lockout.recordSuccess('192.0.2.1');

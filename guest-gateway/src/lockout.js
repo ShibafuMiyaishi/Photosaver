@@ -1,7 +1,7 @@
 // guest-gateway/src/lockout.js
 // 合言葉ログインの総当たり対策。IP(IPv6 は /64 単位)ごとの段階的ロックと、全体の一時停止(メモリ上)。
 // 24 時間以内にログインに成功したアドレス(会場 Wi-Fi など)は「信頼済み」として全体停止の対象外にする。
-// 管理者合言葉の照合は、全アドレス合計の失敗が多すぎる間は止める(信頼済みアドレス経由の総当たり対策)。
+// 管理者合言葉の照合は、信頼済みアドレスからの失敗が多すぎる間は止める(信頼済みアドレス経由の総当たり対策)。
 
 import net from 'node:net';
 import { log } from './log.js';
@@ -25,10 +25,13 @@ const HOUR_MS = 60 * MINUTE_MS;
 // Admin guesses: anyone holding the guest password can make their key trusted and, since a
 // success clears the per-key failures, keep guessing the ADMIN password (every wrong password
 // is also checked against the admin hash) without ever reaching a lock. So a separate global
-// window counts every failed login from every key, trusted or not; while it holds
-// `adminGuessLimit` failures the admin hash is not checked at all (a correct admin password
-// then fails like a wrong one) and guest logins carry on as normal. That holds admin guessing
-// to about `adminGuessLimit` per `adminGuessWindowMs` overall.
+// window counts the failed logins from TRUSTED keys; while it holds `adminGuessLimit` failures
+// the admin hash is not checked at all (a correct admin password then fails like a wrong one)
+// and guest logins carry on as normal. Untrusted keys do not feed it: their guesses are already
+// bounded by the global window and pause (about `globalMaxFailures` per `windowMs`), so admin
+// guessing stays bounded overall (about 600 per 15 minutes with the defaults), and only someone
+// who knows the guest password (or shares a trusted address) can pause admin checks — an
+// anonymous attacker rotating addresses cannot keep the organiser out.
 //
 // Trust lives in memory only and is lost on restart: after a restart the organiser should log
 // in once from the venue Wi-Fi again (and before guests arrive in the first place).
@@ -49,8 +52,8 @@ export const LOCKOUT_DEFAULTS = {
   // once while the window is still full).
   globalMaxFailures: 300,
   globalPauseMs: 5 * MINUTE_MS,
-  // Every failed login (trusted keys included) within the window; at the limit the admin hash
-  // is skipped until the window drops below it again (see "Admin guesses" above).
+  // Failed logins from trusted keys within the window; at the limit the admin hash is skipped
+  // until the window drops below it again (see "Admin guesses" above).
   adminGuessWindowMs: 15 * MINUTE_MS,
   adminGuessLimit: 300,
   // Cap for failure entries and, separately, for trusted keys (only a correct password adds
@@ -126,7 +129,7 @@ export function createLockout(options = {}) {
   const trusted = new Map();
   let globalFailures = [];
   let globalPausedUntil = 0;
-  // Every failed login (any key) for the admin-guess window, and whether it is full.
+  // Failed logins from trusted keys for the admin-guess window, and whether it is full.
   let adminFailures = [];
   let adminPaused = false;
   let lastPrune = 0;
@@ -274,15 +277,18 @@ export function createLockout(options = {}) {
       log('warn', 'login_locked', { ip: key, lockMinutes: lockMs / MINUTE_MS, level: entry.level });
     }
 
-    // Admin guesses count from every key: a trusted key is exactly how a guest-password holder
-    // would otherwise get unlimited tries at the admin password.
-    adminFailures.push(t);
-    if (adminFailures.length > opts.adminGuessLimit) adminFailures.shift();
-    refreshAdminPause(t);
-
+    // A trusted key is exactly how a guest-password holder would otherwise get unlimited tries
+    // at the admin password, so its failures feed the admin-guess window. Untrusted failures do
+    // not: the global window below already bounds them, and counting them would let anyone
+    // with a handful of addresses keep admin login switched off ("Admin guesses" above).
     // A trusted key (correct password within 24 h) is not part of a distributed guess, and its
     // typos must not pause everyone else either.
-    if (isTrusted(key, t)) return;
+    if (isTrusted(key, t)) {
+      adminFailures.push(t);
+      if (adminFailures.length > opts.adminGuessLimit) adminFailures.shift();
+      refreshAdminPause(t);
+      return;
+    }
     globalFailures = trimWindow(globalFailures, t);
     globalFailures.push(t);
     if (globalFailures.length > opts.globalMaxFailures) globalFailures.shift();

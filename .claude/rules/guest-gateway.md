@@ -97,10 +97,15 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   not know, e.g. mif2/heim/heis/avci/MiHE).
 - tus requests (`/files...`) with any query string → 400 `bad_request` (@tus/server takes the upload id
   from `req.url` including the query, which could address an id other than the one the route checked).
-- Free-space check at upload creation: `statfs free < size + MIN_FREE_GB` → 507 (`upload_rejected_disk_full`).
+- Free-space check at upload creation: `statfs free < size + MIN_FREE_GB` → 507 (`upload_rejected_disk_full`,
+  `phase: 'create'`).
   There is NO reservation and no subtraction of in-progress remainders (a guest could otherwise block
   everyone by declaring huge uploads and never sending them), so abandoned partials hold no space.
   `MIN_FREE_GB` (default 50) is the margin that also absorbs several large uploads arriving at once.
+  Hard floor on every chunk: a PATCH (in `onIncomingRequest`, after the device check) with
+  `statfs free < MIN_FREE_GB / 2` → 507 (`upload_rejected_disk_full`, `phase: 'patch'`), so many
+  concurrent large uploads that each passed the create check cannot fill the HDD to 0 (which would
+  stall Immich). One statfs per 50 MB chunk. The client treats 507 as permanent (「受付不可(507)— サーバーの保存容量が不足しています」).
   `scripts/event-status.js` shows in-progress count/remainder (受信途中) for information only; the scan
   (`scanStaging`) is used by reconcile and event-status, never on the request path.
 - Store columns `in_flight` / `ambiguous` (added by `ALTER TABLE` on old DBs): an attempt that ended
@@ -197,17 +202,23 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
    a phone that is already logged in uses a private/incognito tab for this; any guest's successful
    login from the venue address makes it trusted as well. Trusted keys are capped at 10 000; at the
    cap the key with the fewest successes is evicted (ties: oldest success).
-   Admin-guess window: every failed login from ANY key (trusted included) is counted; while ≥ 300
-   fall within 15 min the admin hash is not checked at all (a correct admin password gets the same
-   401 as a wrong one) until the window drops below 300 — logs `admin_check_paused` /
-   `admin_check_resumed`; guest logins are unaffected. Reason: a guest-password holder becomes
-   trusted and a success clears per-key failures, so without this they could guess the admin password
-   forever. Docs recommend a long random admin password (12+ chars) different from the guest one.
+   Admin-guess window: only failed logins from TRUSTED keys are counted; while ≥ 300 fall within
+   15 min the admin hash is not checked at all (a correct admin password gets the same 401 as a
+   wrong one) until the window drops below 300 — logs `admin_check_paused` / `admin_check_resumed`;
+   guest logins are unaffected. Reason: a guest-password holder becomes trusted and a success clears
+   per-key failures, so without this they could guess the admin password forever. Untrusted failures
+   are left out because the untrusted global window/pause already bounds them (~300 / 15 min), so
+   admin guessing stays bounded (≤ ~600 / 15 min overall) and an anonymous attacker rotating
+   addresses cannot keep admin login switched off — only someone who knows the guest password (or
+   shares a trusted address) can pause admin checks. Docs recommend a long random admin password
+   (12+ chars) different from the guest one.
    Residual risks (documented in docs 「残るリスク」): an attacker can keep the global pause on for
    untrusted keys (guests on mobile data may be unable to log in; venue pre-login avoids it); anyone
    sharing the venue address can lock new logins there with 20 wrong passwords (2 min, doubling to
    1 h, level kept 24 h; recovery = recreate the gateway, then log in again from the venue in a private
-   tab); a guest-password holder with several addresses can occupy media/ZIP slots (accepted); a
+   tab); a guest-password holder (or anyone sharing a trusted address) can pause admin checks with
+   300 wrong passwords / 15 min (the organiser waits for `admin_check_resumed`); a guest-password
+   holder with several addresses can occupy media/ZIP slots (accepted); a
    guest-password holder can fill the HDD by really uploading (bandwidth-bound; watch event-status /
    `MIN_FREE_GB`).
    The outer express-rate-limit (30 / 15 min per IP) counts only malformed requests, never 401/429.

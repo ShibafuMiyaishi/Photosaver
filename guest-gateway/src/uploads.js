@@ -1,6 +1,7 @@
 // guest-gateway/src/uploads.js
 // tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・HDD の空き容量を
-// 検査し、受信完了時にファイルの中身(マジックバイト)を判定して計測ログを出す。中身と拡張子が食い違う
+// 検査し(空き容量は送信中も分割ごとに下限の半分を切っていないか確認する)、受信完了時に
+// ファイルの中身(マジックバイト)を判定して計測ログを出す。中身と拡張子が食い違う
 // 正直なファイル(.jpg の HEIC など)は、Immich に渡すファイル名の拡張子を中身に合わせて直す。
 // 受信途中のアップロードは開始した端末からしか再開できない(別の端末には存在しないのと同じ 404)。
 // 取り込みモードでは完了したファイルをステージング内の importing/ に移し、onReceived で
@@ -366,6 +367,17 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
         });
         throw NOT_FOUND;
       }
+      // Hard floor for each chunk: the create-time check only sees what is free at that moment,
+      // so many large uploads running at once could each pass it and together fill the HDD
+      // (which stalls Immich too). Half of MIN_FREE_GB leaves room for chunks already being
+      // written; one statfs per PATCH (chunks are up to 50 MB) is cheap.
+      if (
+        req.method === 'PATCH' &&
+        (await freeBytes(config.stagingDir)) < config.minFreeBytes / 2
+      ) {
+        log('warn', 'upload_rejected_disk_full', { id, phase: 'patch' });
+        throw reject(507, 'Server storage is full');
+      }
     }),
 
     onUploadCreate: guardHook('create', reject(503, 'Storage unavailable'), async (req, upload) => {
@@ -384,7 +396,7 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
       // subtracted (a guest could otherwise block everyone by declaring large uploads and never
       // sending them). MIN_FREE_GB is sized to absorb several large uploads arriving at once.
       if ((await freeBytes(config.stagingDir)) < upload.size + config.minFreeBytes) {
-        log('warn', 'upload_rejected_disk_full', { size: upload.size });
+        log('warn', 'upload_rejected_disk_full', { size: upload.size, phase: 'create' });
         throw reject(507, 'Server storage is full');
       }
       const session = nodeRequest(req)?.gwSession;

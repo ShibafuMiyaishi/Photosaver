@@ -6,6 +6,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as tus from 'tus-js-client';
+import { vi } from 'vitest';
 import { openStore } from '../src/store.js';
 import { IMPORT_DIR_NAME, KEPT_DIR_NAME } from '../src/uploads.js';
 import { login, startServer, TMP_ROOT } from './helpers/server.js';
@@ -394,6 +395,7 @@ describe('startup reconcile (speed-test mode)', () => {
 describe('free space check', () => {
   let srv;
   afterEach(async () => {
+    vi.restoreAllMocks();
     await srv.close();
   });
 
@@ -420,5 +422,32 @@ describe('free space check', () => {
     expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(201);
     expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(201);
     expect((await createRaw(srv.baseUrl, other.cookie, GIB)).status).toBe(201);
+  });
+
+  it('rejects a chunk (PATCH) once free space falls below half of MIN_FREE (507)', async () => {
+    await startTight();
+    const { cookie } = await login(srv.baseUrl);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const half = Buffer.from(PNG.subarray(0, 32));
+    const created = await createRaw(srv.baseUrl, cookie, PNG.length);
+    expect(created.status).toBe(201);
+    // Other uploads filled the disk meanwhile: exactly half of MIN_FREE is still accepted...
+    const realStatfs = fs.statfs;
+    const fakeFree = (bytes) =>
+      vi.spyOn(fs, 'statfs').mockImplementation(async (dir) => ({
+        ...(await realStatfs(dir)),
+        bavail: bytes,
+        bsize: 1,
+      }));
+    fakeFree(srv.config.minFreeBytes / 2);
+    expect((await patch(srv.baseUrl, cookie, created.location, 0, half)).status).toBe(204);
+    // ...one byte less is not, and nothing more is written.
+    fakeFree(srv.config.minFreeBytes / 2 - 1);
+    const full = await patch(srv.baseUrl, cookie, created.location, half.length, PNG.subarray(32));
+    expect(full.status).toBe(507);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"phase":"patch"'));
+    expect((await head(srv.baseUrl, cookie, created.location)).headers.get('upload-offset')).toBe(
+      String(half.length),
+    );
   });
 });
