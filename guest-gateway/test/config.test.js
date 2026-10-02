@@ -18,6 +18,7 @@ describe('loadConfig', () => {
     expect(config.host).toBe('127.0.0.1');
     expect(config.port).toBe(8080);
     expect(config.maxFileBytes).toBe(4 * 1024 ** 3);
+    expect(config.minFreeBytes).toBe(50 * 1024 ** 3);
     expect(config.keepUploads).toBe(false);
     expect(config.cookieSecure).toBe(true);
     expect(config.closesAt).toBe(Date.parse(VALID.CLOSES_AT));

@@ -6,6 +6,7 @@
 // 取り込み待ちに戻せる)。状態は store にあるので再起動しても再開できる。
 // 結果が分からないまま終わった送信(通信断・時間切れ・停止・5xx)の後の再送が「重複」になったら、
 // それは自分の前回の送信が届いていたものとみなし、他に作成者がいなければ「作成」として記録する。
+// その推測の後に別の端末の送信が本当に「作成」になったら、推測した行は「重複」に戻す。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -122,6 +123,7 @@ export function createImporter({
       // A duplicate of something deleted here is the trashed copy, which stays out of the album —
       // unless the organiser restored it meanwhile.
       let status = result.status;
+      let reclaimed = false;
       if (status === 'duplicate' && store.wasDeleted(result.id)) {
         if (await immich.isAssetVisible(result.id)) store.clearDeleted(result.id);
         else status = 'trashed';
@@ -129,9 +131,15 @@ export function createImporter({
         // Most likely our own earlier attempt created it and the answer was lost: credit this
         // device (uploader name, own-delete) as if that attempt had succeeded.
         status = 'created';
+        reclaimed = true;
         log('info', 'import_duplicate_reclaimed', { id: uploadId, attempts });
       }
-      store.markImported(uploadId, status, result.id);
+      // A genuine `created` also reverts any row that reclaimed this asset by mistake (another
+      // device's request with the same bytes was still on its way when the guess was made).
+      const reverted = store.markImported(uploadId, status, result.id, { reclaimed });
+      for (const revertedId of reverted) {
+        log('warn', 'import_reclaim_reverted', { id: revertedId, createdBy: uploadId });
+      }
       log('info', 'import_done', { id: uploadId, status, attempts });
       await discard(uploadId);
       return 'done';

@@ -15,6 +15,9 @@ import { DatabaseSync } from 'node:sqlite';
 // in_flight: an Immich attempt has started and not ended (still 1 after a crash mid-upload).
 // ambiguous: an earlier attempt may have reached Immich without us learning the result (network
 // error, timeout, abort, 5xx, crash): a later `duplicate` may then be our own asset (see importer).
+// reclaimed: `created` was inferred from such a `duplicate`, not reported by Immich. If another row
+// later gets a genuine `created` for the same asset, the guess was wrong and the row becomes a
+// `duplicate` again (markImported).
 export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'trashed'];
 const UPLOADER_CHUNK = 500;
 
@@ -33,6 +36,7 @@ CREATE TABLE IF NOT EXISTS uploads (
   deleted_at    INTEGER,
   ambiguous     INTEGER NOT NULL DEFAULT 0,
   in_flight     INTEGER NOT NULL DEFAULT 0,
+  reclaimed     INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -45,6 +49,7 @@ const ADDED_COLUMNS = [
   ['deleted_at', 'INTEGER'],
   ['ambiguous', 'INTEGER NOT NULL DEFAULT 0'],
   ['in_flight', 'INTEGER NOT NULL DEFAULT 0'],
+  ['reclaimed', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
 /**
@@ -74,8 +79,13 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const getOne = db.prepare('SELECT * FROM uploads WHERE upload_id = ?');
   const setDone = db.prepare(
-    'UPDATE uploads SET status = ?, asset_id = ?, in_flight = 0, updated_at = ? WHERE upload_id = ?',
+    'UPDATE uploads SET status = ?, asset_id = ?, reclaimed = ?, in_flight = 0, updated_at = ? WHERE upload_id = ?',
   );
+  // Rows that only guessed they created this asset (reclaimed) lose it to the real creator.
+  const revertReclaimed = db.prepare(`
+    UPDATE uploads SET status = 'duplicate', reclaimed = 0, updated_at = ?
+    WHERE asset_id = ? AND status = 'created' AND reclaimed = 1 AND upload_id != ?
+    RETURNING upload_id`);
   const setFailed = db.prepare(
     "UPDATE uploads SET status = 'failed', in_flight = 0, updated_at = ? WHERE upload_id = ?",
   );
@@ -163,9 +173,30 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
       return getOne.get(uploadId);
     },
 
-    /** @param {'created'|'duplicate'|'trashed'} status */
-    markImported(uploadId, status, assetId) {
-      setDone.run(status, assetId, now(), uploadId);
+    /**
+     * Record the import result. reclaimed: `created` inferred from a `duplicate` after an
+     * ambiguous attempt. A genuine `created` (Immich said so) turns every reclaimed row for the
+     * same asset back into `duplicate`, in the same transaction.
+     * @param {'created'|'duplicate'|'trashed'} status
+     * @param {{ reclaimed?: boolean }} [options]
+     * @returns {string[]} upload ids whose reclaimed `created` was reverted
+     */
+    markImported(uploadId, status, assetId, { reclaimed = false } = {}) {
+      const t = now();
+      const isReclaimed = status === 'created' && reclaimed;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        setDone.run(status, assetId, isReclaimed ? 1 : 0, t, uploadId);
+        const reverted =
+          status === 'created' && !isReclaimed
+            ? revertReclaimed.all(t, assetId, uploadId).map((r) => r.upload_id)
+            : [];
+        db.exec('COMMIT');
+        return reverted;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     },
 
     markFailed(uploadId) {

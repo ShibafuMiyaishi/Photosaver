@@ -1,5 +1,5 @@
 // guest-gateway/src/uploads.js
-// tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・空き容量(受信途中の残り分も差し引く)を
+// tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・HDD の空き容量を
 // 検査し、受信完了時にファイルの中身(マジックバイト)を判定して計測ログを出す。中身と拡張子が食い違う
 // 正直なファイル(.jpg の HEIC など)は、Immich に渡すファイル名の拡張子を中身に合わせて直す。
 // 受信途中のアップロードは開始した端末からしか再開できない(別の端末には存在しないのと同じ 404)。
@@ -54,12 +54,14 @@ export const ALLOWED_EXTENSIONS = new Set([
 
 export const ALLOWED_MIME_TYPES = new Set(Object.keys(EXTENSIONS_BY_MIME));
 
+// Image formats stored in an ISO base media (ftyp) container. file-type reports `video/mp4` for
+// every ftyp brand it does not list (HEIF brands such as mif2, heim, heis, avci, MiHE), so a
+// `video/mp4` detection says nothing about whether such a file is a video.
+const ISOBMFF_IMAGE_EXTENSIONS = new Set(['heic', 'heif', 'avif']);
+
 // tus counts expiry from creation, so this must outlast the slowest large upload.
 // Staging is purged at CLOSES_AT anyway.
 const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
-// A create that passed the free-space check holds its full size until its `<id>.json` is on disk
-// (then the disk scan counts it); a create that fails in between is forgotten after this long.
-const RESERVATION_TTL_MS = 10 * 60 * 1000;
 // Same status and body as @tus/utils ERRORS.FILE_NOT_FOUND, so an upload of another device looks
 // exactly like one that does not exist.
 const NOT_FOUND = { status_code: 404, body: 'The file for this url was not found\n' };
@@ -93,13 +95,16 @@ export function extensionOf(filename) {
  * The name to give Immich for a file whose content was detected as `mime` (an allowed type).
  * Immich picks its image/video pipeline by extension, so a name whose extension does not belong
  * to the content (an MP4 called .png, a HEIC called .jpg by a messaging app) gets the canonical
- * extension of the detected type instead. Returns the name unchanged when it already fits.
+ * extension of the detected type instead. Returns the name unchanged when it already fits, and
+ * keeps a HEIF/AVIF name that file-type only recognised as some ISOBMFF file (`video/mp4`).
  * @returns {{ filename: string, from: string, to: string } | null} null = no change needed
  */
 export function correctExtension(filename, mime) {
   const allowed = EXTENSIONS_BY_MIME[mime];
   const ext = extensionOf(filename);
   if (!allowed || allowed.includes(ext)) return null;
+  // Generic ISOBMFF detection: never turn an image (IMG.HEIC) into a video (IMG.mp4).
+  if (mime === 'video/mp4' && ISOBMFF_IMAGE_EXTENSIONS.has(ext)) return null;
   const base = ext ? filename.slice(0, -(ext.length + 1)) : filename;
   return { filename: `${base}.${allowed[0]}`, from: ext, to: allowed[0] };
 }
@@ -167,9 +172,10 @@ function parseLastModified(value) {
 }
 
 /**
- * The tus uploads in the staging dir, read from disk (so it survives restarts): every top-level
- * `<id>.json` (@tus/file-store's info file) with its declared size and how many bytes its data
- * file holds (`received` is null when the data file is missing).
+ * The tus uploads in the staging dir, read from disk: every top-level `<id>.json`
+ * (@tus/file-store's info file) with its declared size and how many bytes its data file holds
+ * (`received` is null when the data file is missing). Used by startup reconcile and by
+ * scripts/event-status.js (受信途中); never on the request path.
  * @param {string} stagingDir
  * @returns {Promise<Map<string, { size: number, received: number|null }>>}
  */
@@ -213,40 +219,15 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
     expirationPeriodInMilliseconds: FORTY_EIGHT_HOURS_MS,
   });
 
-  // Free-space check: created uploads that are not on disk yet (id → { size, at }) and a
-  // one-at-a-time queue so two creates cannot both count the same free space.
-  const reservations = new Map();
-  let spaceCheckQueue = Promise.resolve();
-
-  function serializeSpaceCheck(fn) {
-    const run = spaceCheckQueue.then(fn);
-    spaceCheckQueue = run.catch(() => {});
-    return run;
-  }
-
-  /** Bytes that uploads in progress (or just accepted) will still write into staging. */
-  async function pendingBytes() {
-    const onDisk = await scanStaging(config.stagingDir);
-    let total = 0;
-    for (const { size, received } of onDisk.values()) {
-      if (received !== null) total += Math.max(0, size - received);
-    }
-    const now = Date.now();
-    for (const [id, reservation] of reservations) {
-      if (onDisk.has(id) || now - reservation.at > RESERVATION_TTL_MS) reservations.delete(id);
-      else total += reservation.size;
-    }
-    return total;
-  }
-
-  /** Move a finished file out of tus' reach so expiry cleanup never deletes it. */
+  /**
+   * Move a finished file out of tus' reach so expiry cleanup never deletes it. The caller drops
+   * the info file (FileStore keeps it next to the data as `<id>.json`) once the move is complete.
+   */
   async function moveFinished(filePath, dirName, name) {
     const targetDir = path.join(config.stagingDir, dirName);
     await fs.mkdir(targetDir, { recursive: true });
     const target = path.join(targetDir, name);
     await fs.rename(filePath, target);
-    // FileStore keeps its info next to the file as `<id>.json`.
-    await fs.rm(`${filePath}.json`, { force: true });
     return target;
   }
 
@@ -318,17 +299,28 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
         await datastore.remove(upload.id).catch(() => {});
         throw err;
       }
+      // Record before dropping the info file: a crash in between leaves `<id>.json` next to a
+      // recorded row, which startup reconcile simply removes (the other order could lose the
+      // file in importing/ forever, and a resume HEAD in that window re-sent the whole file).
       try {
         record(upload, mime, filename);
       } catch (err) {
-        // Not recorded = never imported and never resumed: do not leave an orphan behind.
+        // Not recorded = never imported and never resumed: do not leave an orphan behind, and
+        // drop the info file so the client's HEAD gets 404 and it sends the file again.
         await fs.rm(importPath, { force: true });
+        await fs.rm(`${filePath}.json`, { force: true });
         throw err;
       }
+      // Recorded and queued: the upload succeeded. A leftover info file is harmless (the
+      // resume HEAD is answered from the row; startup reconcile removes it).
+      await fs.rm(`${filePath}.json`, { force: true }).catch((err) => {
+        log('error', 'staging_info_remove_failed', { id: upload.id, error: err.message });
+      });
     } else if (config.keepUploads) {
       try {
         const ext = extensionOf(filename) || 'bin';
         const keptPath = await moveFinished(filePath, KEPT_DIR_NAME, `${upload.id}.${ext}`);
+        await fs.rm(`${filePath}.json`, { force: true });
         log('info', 'upload_kept', { id: upload.id, file: path.basename(keptPath) });
       } catch (err) {
         log('error', 'staging_keep_failed', { id: upload.id, error: err.message });
@@ -388,15 +380,13 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
         log('warn', 'upload_rejected_mount_marker_missing', { size: upload.size });
         throw reject(503, 'Storage unavailable');
       }
-      await serializeSpaceCheck(async () => {
-        const free = await freeBytes(config.stagingDir);
-        const pending = await pendingBytes();
-        if (free - pending < upload.size + config.minFreeBytes) {
-          log('warn', 'upload_rejected_disk_full', { size: upload.size, pending });
-          throw reject(507, 'Server storage is full');
-        }
-        reservations.set(upload.id, { size: upload.size, at: Date.now() });
-      });
+      // Only what is free right now: bytes that uploads in progress will still write are not
+      // subtracted (a guest could otherwise block everyone by declaring large uploads and never
+      // sending them). MIN_FREE_GB is sized to absorb several large uploads arriving at once.
+      if ((await freeBytes(config.stagingDir)) < upload.size + config.minFreeBytes) {
+        log('warn', 'upload_rejected_disk_full', { size: upload.size });
+        throw reject(507, 'Server storage is full');
+      }
       const session = nodeRequest(req)?.gwSession;
       log('info', 'upload_created', {
         id: upload.id,
@@ -421,9 +411,6 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
       return { headers: { 'X-GW-Detected-Type': mime } };
     }),
   });
-
-  // Once its `<id>.json` exists the disk scan counts the upload; drop the reservation early.
-  server.on('POST_CREATE', (_req, upload) => reservations.delete(upload?.id));
 
   /** The recorded row of an upload this device finished (and that left staging), or null. */
   function receivedByCaller(req) {

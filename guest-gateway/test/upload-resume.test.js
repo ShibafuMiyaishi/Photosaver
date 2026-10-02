@@ -1,7 +1,8 @@
 // guest-gateway/test/upload-resume.test.js
 // 受信の再開まわり: 受信途中のアップロードは開始した端末だけが再開できること、受信済みへの再開確認に
-// 「完了」と答えること、起動時の拾い直し、拡張子の補正、受信途中の残り容量を差し引く空き容量検査。
+// 「完了」と答えること、起動時の拾い直し、拡張子の補正、空き容量検査(宣言だけの受信途中分は数えない)。
 
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as tus from 'tus-js-client';
@@ -21,6 +22,15 @@ const MP4 = Buffer.concat([
   Buffer.from('isomiso2'),
   Buffer.alloc(64),
 ]);
+// HEIF images whose ftyp brand file-type does not list (it reports them as video/mp4).
+const heifWithBrand = (brand) =>
+  Buffer.concat([
+    Buffer.from([0, 0, 0, 0x18]),
+    Buffer.from(`ftyp${brand}`),
+    Buffer.from([0, 0, 0, 0]),
+    Buffer.from(`${brand}mif1`),
+    Buffer.alloc(64),
+  ]);
 const CSRF = { 'X-Requested-With': 'guest-gateway' };
 const GIB = 1024 ** 3;
 
@@ -210,6 +220,17 @@ describe('upload resume (import mode)', () => {
     expect(store.get(honest.id)).toMatchObject({ filename: 'IMG_0003.png' });
   });
 
+  it('keeps a HEIC name whose ftyp brand file-type only knows as video/mp4', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const mif2 = await tusUpload(srv.baseUrl, cookie, heifWithBrand('mif2'), 'IMG_0004.HEIC');
+    const heim = await tusUpload(srv.baseUrl, cookie, heifWithBrand('heim'), 'IMG_0005.HEIC');
+    expect(mif2.ok).toBe(true);
+    expect(heim.ok).toBe(true);
+    expect(store.get(mif2.id)).toMatchObject({ filename: 'IMG_0004.HEIC', status: 'pending' });
+    expect(store.get(heim.id)).toMatchObject({ filename: 'IMG_0005.HEIC', status: 'pending' });
+    expect(enqueued).toEqual([mif2.id, heim.id]);
+  });
+
   describe('startup reconcile', () => {
     async function stage(id, { data, size = data.length, metadata = {} }) {
       const info = {
@@ -270,12 +291,85 @@ describe('upload resume (import mode)', () => {
       expect((await fs.readdir(srv.stagingDir)).filter((n) => n.endsWith('.json'))).toEqual([]);
     });
 
+    it('only removes the info file left next to a recorded (and maybe imported) upload', async () => {
+      // Crash after record() but before the info file was removed; the importer may already
+      // have sent the file and removed it from importing/.
+      for (const id of ['done1', 'queued1']) {
+        await stage(id, { size: PNG.length });
+        store.add({
+          uploadId: id,
+          deviceId: 'dev-1',
+          nickname: 'たろう',
+          filename: 'IMG_0009.png',
+          mime: 'image/png',
+          size: PNG.length,
+          lastModified: null,
+        });
+      }
+      await fs.mkdir(path.join(srv.stagingDir, IMPORT_DIR_NAME), { recursive: true });
+      await fs.writeFile(path.join(srv.stagingDir, IMPORT_DIR_NAME, 'queued1'), PNG);
+
+      expect(await srv.tusServer.reconcile()).toBe(0);
+      expect(enqueued).toEqual([]);
+      expect((await fs.readdir(srv.stagingDir)).filter((n) => n.endsWith('.json'))).toEqual([]);
+      expect(await exists(path.join(srv.stagingDir, IMPORT_DIR_NAME, 'queued1'))).toBe(true);
+    });
+
     it('drops complete uploads whose content is not allowed', async () => {
       await stage('bad1', { data: Buffer.from('%PDF-1.7\n'.repeat(20)) });
       expect(await srv.tusServer.reconcile()).toBe(0);
       expect(store.get('bad1')).toBeUndefined();
       expect(await exists(path.join(srv.stagingDir, 'bad1'))).toBe(false);
     });
+  });
+});
+
+describe('finish step order (import mode)', () => {
+  let srv;
+  let store;
+  afterEach(async () => {
+    store.close();
+    await srv.close();
+  });
+
+  it('records the upload before dropping its info file', async () => {
+    store = openStore(':memory:');
+    const seen = [];
+    const recording = {
+      ...store,
+      add(row) {
+        const staging = srv.stagingDir;
+        seen.push({
+          info: fsSync.existsSync(path.join(staging, `${row.uploadId}.json`)),
+          moved: fsSync.existsSync(path.join(staging, IMPORT_DIR_NAME, row.uploadId)),
+        });
+        store.add(row);
+      },
+    };
+    srv = await startServer({}, { store: recording, importer: { enqueue: () => {} } });
+    const { cookie } = await login(srv.baseUrl);
+    const result = await tusUpload(srv.baseUrl, cookie, PNG, 'IMG_0006.png');
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual([{ info: true, moved: true }]);
+    expect(await exists(path.join(srv.stagingDir, `${result.id}.json`))).toBe(false);
+  });
+
+  it('drops the moved file and the info file when recording fails', async () => {
+    store = openStore(':memory:');
+    const broken = {
+      ...store,
+      add() {
+        throw new Error('disk I/O error');
+      },
+    };
+    srv = await startServer({}, { store: broken, importer: { enqueue: () => {} } });
+    const { cookie } = await login(srv.baseUrl);
+    const created = await createRaw(srv.baseUrl, cookie, PNG.length);
+    expect((await patch(srv.baseUrl, cookie, created.location, 0, PNG)).status).toBe(500);
+    expect(await exists(path.join(srv.stagingDir, IMPORT_DIR_NAME, created.id))).toBe(false);
+    expect(await exists(path.join(srv.stagingDir, `${created.id}.json`))).toBe(false);
+    // The client's retry HEAD gets 404 and it sends the file again.
+    expect((await head(srv.baseUrl, cookie, created.location)).status).toBe(404);
   });
 });
 
@@ -303,7 +397,7 @@ describe('free space check', () => {
     await srv.close();
   });
 
-  // Room for one 1 GiB upload but not two: the second must count the first one's missing bytes.
+  // Free space right now leaves room for a 1 GiB upload above MIN_FREE, but not for 2 GiB.
   async function startTight() {
     await fs.mkdir(TMP_ROOT, { recursive: true });
     const stats = await fs.statfs(TMP_ROOT);
@@ -311,29 +405,20 @@ describe('free space check', () => {
     srv = await startServer({ minFreeBytes: free - 1.5 * GIB });
   }
 
-  it('subtracts the bytes uploads in progress will still write', async () => {
+  it('rejects an upload that would leave less than MIN_FREE free (507)', async () => {
     await startTight();
     const { cookie } = await login(srv.baseUrl);
+    expect((await createRaw(srv.baseUrl, cookie, 2 * GIB)).status).toBe(507);
     expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(201);
-    expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(507);
   });
 
-  it('does not let two simultaneous creates share the same free space', async () => {
+  it('does not let declared but unsent uploads block other guests', async () => {
     await startTight();
     const { cookie } = await login(srv.baseUrl);
-    const results = await Promise.all([
-      createRaw(srv.baseUrl, cookie, GIB),
-      createRaw(srv.baseUrl, cookie, GIB),
-    ]);
-    expect(results.map((r) => r.status).sort()).toEqual([201, 507]);
-  });
-
-  it('counts uploads left in staging by an earlier run (read from disk)', async () => {
-    await startTight();
-    const info = { id: 'old1', size: GIB, offset: 0, metadata: { filename: 'a.mov' } };
-    await fs.writeFile(path.join(srv.stagingDir, 'old1.json'), JSON.stringify(info));
-    await fs.writeFile(path.join(srv.stagingDir, 'old1'), '');
-    const { cookie } = await login(srv.baseUrl);
-    expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(507);
+    const other = await login(srv.baseUrl, undefined, 'はなこ');
+    // Declared sizes are not reserved: only the bytes actually on disk count.
+    expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(201);
+    expect((await createRaw(srv.baseUrl, cookie, GIB)).status).toBe(201);
+    expect((await createRaw(srv.baseUrl, other.cookie, GIB)).status).toBe(201);
   });
 });
