@@ -88,10 +88,12 @@ export function handleError(err, req, res, next) {
  *   store?: ReturnType<import('./store.js').openStore>,
  *   importer?: ReturnType<import('./importer.js').createImporter>,
  *   immich?: ReturnType<import('./immich.js').createImmichClient>,
+ *   lockoutOptions?: Parameters<typeof createLockout>[0],
  * }} [deps] store + importer = import mode; neither = speed-test mode (files are not imported).
- *   immich (with store) enables the gallery.
+ *   immich (with store) enables the gallery. lockoutOptions (tests only) override the lockout
+ *   limits and clock.
  */
-export function createApp(config, { store, importer, immich } = {}) {
+export function createApp(config, { store, importer, immich, lockoutOptions } = {}) {
   const app = express();
   const importing = Boolean(store && importer);
   const tusServer = createTusServer(
@@ -109,6 +111,7 @@ export function createApp(config, { store, importer, immich } = {}) {
   const lockout = createLockout({
     maxFailures: config.loginMaxFailures,
     baseLockMs: config.loginLockMs,
+    ...lockoutOptions,
   });
   const isClosed = () => Date.now() >= config.closesAt;
   // Fingerprint of the organiser password hash, stored in admin sessions.
@@ -272,13 +275,24 @@ export function createApp(config, { store, importer, immich } = {}) {
     }
     try {
       // Guest first: if both passwords were ever set to the same value, nobody becomes admin.
+      // The admin hash is skipped while too many logins fail overall (lockout.js "Admin
+      // guesses"): a guest-password holder must not get unlimited admin guesses.
       let role = null;
-      if (await verifyPassword(password, config.guestPasswordHash)) role = 'guest';
-      else if (
-        config.adminPasswordHash &&
-        (await verifyPassword(password, config.adminPasswordHash))
-      ) {
-        role = 'admin';
+      try {
+        if (await verifyPassword(password, config.guestPasswordHash)) role = 'guest';
+        else if (
+          config.adminPasswordHash &&
+          lockout.adminCheckAllowed() &&
+          (await verifyPassword(password, config.adminPasswordHash))
+        ) {
+          role = 'admin';
+        }
+      } catch (err) {
+        // scrypt itself failed (e.g. out of memory): not a wrong password, so nothing is
+        // recorded against the client; it may simply try again.
+        log('error', 'login_check_failed', { error: err.message });
+        res.set('Retry-After', '5');
+        return res.status(503).json({ error: 'unavailable' });
       }
       if (!role) {
         log('warn', 'login_failed', { ip: req.ip });
@@ -337,7 +351,14 @@ export function createApp(config, { store, importer, immich } = {}) {
     app.use(gallery);
   }
 
-  app.all(TUS_ROUTE, requireSession, (req, res, next) => {
+  // @tus/server takes the upload id from req.url including any query string, so a query could
+  // make it address an id other than the one the route pattern checked: refuse it outright.
+  const rejectQuery = (req, res, next) => {
+    if (req.originalUrl.includes('?')) return res.status(400).json({ error: 'bad_request' });
+    return next();
+  };
+
+  app.all(TUS_ROUTE, rejectQuery, requireSession, (req, res, next) => {
     // GET would let tus serve staged files back; OPTIONS/DELETE are not needed.
     if (!TUS_METHODS.has(req.method)) return next();
     return tusServer.handle(req, res);

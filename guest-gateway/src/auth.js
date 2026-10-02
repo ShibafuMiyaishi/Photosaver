@@ -22,6 +22,12 @@ const SCRYPT_LIMITS = Object.freeze({
   maxMemBytes: 1024 ** 3,
 });
 const KEY_LEN = 32;
+const SALT_LEN = 16;
+// Accepted sizes of a stored hash: what hashPassword writes (16-byte salt, 32-byte key) and
+// longer keys up to 64 bytes. Anything shorter is a truncated paste, not a usable hash.
+const MIN_SALT_LEN = 16;
+const MIN_KEY_LEN = 32;
+const MAX_KEY_LEN = 64;
 
 /**
  * maxmem for crypto.scrypt. Node's default (32 MiB) is below the ~128 MiB (128·N·r) that
@@ -57,10 +63,25 @@ export function parseScryptHash(stored) {
   const [N, r, p] = parts.slice(1, 4).map((v) => (/^\d+$/.test(v) ? Number(v) : NaN));
   const problem = scryptParamsProblem({ N, r, p });
   if (problem) return { error: problem };
-  const salt = Buffer.from(parts[4], 'base64url');
-  const expected = Buffer.from(parts[5], 'base64url');
-  if (salt.length === 0 || expected.length === 0) return { error: 'empty salt or hash' };
+  const salt = decodeBase64url(parts[4]);
+  const expected = decodeBase64url(parts[5]);
+  if (!salt || !expected) return { error: 'salt and hash must be unpadded base64url' };
+  if (salt.length < MIN_SALT_LEN) return { error: `salt must be at least ${MIN_SALT_LEN} bytes` };
+  if (expected.length < MIN_KEY_LEN || expected.length > MAX_KEY_LEN) {
+    return { error: `hash must be ${MIN_KEY_LEN} to ${MAX_KEY_LEN} bytes` };
+  }
   return { params: { N, r, p }, salt, expected };
+}
+
+/**
+ * Strict base64url: only A-Z a-z 0-9 - _ (no padding), and it must be the canonical encoding
+ * of the bytes (Buffer.from silently skips other characters and stray trailing bits).
+ * @returns {Buffer | null}
+ */
+function decodeBase64url(text) {
+  if (!/^[A-Za-z0-9_-]+$/.test(text)) return null;
+  const bytes = Buffer.from(text, 'base64url');
+  return bytes.toString('base64url') === text ? bytes : null;
 }
 
 /**
@@ -72,25 +93,31 @@ export async function hashPassword(password, params = SCRYPT_PARAMS) {
   const problem = scryptParamsProblem(params);
   if (problem) throw new Error(`invalid scrypt parameters: ${problem}`);
   const { N, r, p } = params;
-  const salt = crypto.randomBytes(16);
+  const salt = crypto.randomBytes(SALT_LEN);
   const key = await scrypt(password, salt, KEY_LEN, { N, r, p, maxmem: maxmemFor(params) });
   return ['scrypt', N, r, p, salt.toString('base64url'), key.toString('base64url')].join(':');
 }
 
+/**
+ * False for a wrong password, a non-string password or an unusable stored hash. A failure of
+ * scrypt itself (e.g. memory) is thrown, not turned into false: it says nothing about the
+ * password, so the caller must not count it as a wrong guess.
+ */
 export async function verifyPassword(password, stored) {
   if (typeof password !== 'string') return false;
   const parsed = parseScryptHash(stored);
   if (parsed.error) return false;
   const { params, salt, expected } = parsed;
+  let actual;
   try {
-    const actual = await scrypt(password, salt, expected.length, {
+    actual = await scrypt(password, salt, expected.length, {
       ...params,
       maxmem: maxmemFor(params),
     });
-    return crypto.timingSafeEqual(actual, expected);
-  } catch {
-    return false;
+  } catch (err) {
+    throw new Error(`scrypt failed: ${err.message}`, { cause: err });
   }
+  return crypto.timingSafeEqual(actual, expected);
 }
 
 function sign(payloadB64, secret) {
