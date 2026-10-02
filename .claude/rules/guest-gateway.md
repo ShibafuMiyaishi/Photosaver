@@ -105,7 +105,8 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
   Hard floor on every chunk: a PATCH (in `onIncomingRequest`, after the device check) with
   `statfs free < MIN_FREE_GB / 2` → 507 (`upload_rejected_disk_full`, `phase: 'patch'`), so many
   concurrent large uploads that each passed the create check cannot fill the HDD to 0 (which would
-  stall Immich). One statfs per 50 MB chunk. The client treats 507 as permanent (「受付不可(507)— サーバーの保存容量が不足しています」).
+  stall Immich). One statfs per 50 MB chunk; if statfs itself fails the chunk is let through and
+  `upload_free_space_check_failed` is logged (the create check and mount marker still guard the disk). The client treats 507 as permanent (「受付不可(507)— サーバーの保存容量が不足しています」).
   `scripts/event-status.js` shows in-progress count/remainder (受信途中) for information only; the scan
   (`scanStaging`) is used by reconcile and event-status, never on the request path.
 - Store columns `in_flight` / `ambiguous` (added by `ALTER TABLE` on old DBs): an attempt that ended
@@ -187,7 +188,9 @@ guest browser → https://<TS_HOSTNAME>.<tailnet>.ts.net (Funnel :443)
    canonical unpadded base64url (`[A-Za-z0-9_-]`, re-encoding must give the same text); salt < 16 bytes;
    hash outside 32–64 bytes (a truncated paste). A scrypt failure at runtime (e.g. memory) is thrown,
    not treated as a wrong password: login → 503 `unavailable` + `Retry-After: 5`, log
-   `login_check_failed`, NOT recorded as a failure (the UI shows 「通信エラーです(503)…」, no auto-retry).
+   `login_check_failed`, NOT recorded as a failure. The login form auto-retries it like 429 `busy`
+   (Retry-After 5 s + jitter, within the 45 s / 20-retry budget); 「通信エラーです(503)…」 only when
+   that budget runs out.
    Checks in flight: 1 per client key, 3 per trusted key (venue Wi-Fi), 4 in total → else 429 `busy` +
    `Retry-After: 1`. The login form (`public/login-retry.js`) retries busy for up to 45 s / 20 retries
    (Retry-After + jitter growing 1 s → 3 s per retry) and shows 「混み合っています。自動でもう一度

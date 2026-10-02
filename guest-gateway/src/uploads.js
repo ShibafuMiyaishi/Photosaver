@@ -371,12 +371,19 @@ export function createTusServer(config, { onReceived, findReceived } = {}) {
       // so many large uploads running at once could each pass it and together fill the HDD
       // (which stalls Immich too). Half of MIN_FREE_GB leaves room for chunks already being
       // written; one statfs per PATCH (chunks are up to 50 MB) is cheap.
-      if (
-        req.method === 'PATCH' &&
-        (await freeBytes(config.stagingDir)) < config.minFreeBytes / 2
-      ) {
-        log('warn', 'upload_rejected_disk_full', { id, phase: 'patch' });
-        throw reject(507, 'Server storage is full');
+      // If statfs itself fails, let the chunk through and log it: the create-time check and the
+      // mount-marker check still guard the disk, and failing every PATCH with 500 would not help.
+      if (req.method === 'PATCH') {
+        let free = Infinity;
+        try {
+          free = await freeBytes(config.stagingDir);
+        } catch (err) {
+          log('warn', 'upload_free_space_check_failed', { id, error: err.message });
+        }
+        if (free < config.minFreeBytes / 2) {
+          log('warn', 'upload_rejected_disk_full', { id, phase: 'patch' });
+          throw reject(507, 'Server storage is full');
+        }
       }
     }),
 

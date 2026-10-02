@@ -33,7 +33,7 @@
 | `src/gallery.js` | 一覧(全件集約・重複除去)、画像・動画・原寸の中継(端末・接続元・全体の同時数上限)、削除、ZIP の分割計画と中継 |
 | `src/immich.js` | Immich v3 の呼び出し(共有リンクキー: アップロード・一覧・メディア・ZIP / 削除専用キー: 削除) |
 | `src/log.js` | 1 行 1 JSON のログ(秘密情報は出さない) |
-| `public/` | ゲスト用画面(ビルド工程なし)。`gallery.js` は「みんなの写真」(PhotoSwipe)、`bulk.js` は端末別の保存、`upload-retry.js` は送信失敗の分類と自動再試行の間隔、`login-retry.js` はログインが「混み合っています」(429 busy)のときの自動再試行の間隔(最大 45 秒・20 回) |
+| `public/` | ゲスト用画面(ビルド工程なし)。`gallery.js` は「みんなの写真」(PhotoSwipe)、`bulk.js` は端末別の保存、`upload-retry.js` は送信失敗の分類と自動再試行の間隔、`login-retry.js` はログインが「混み合っています」(429 busy)・照合失敗(503)のときの自動再試行の間隔(最大 45 秒・20 回) |
 | `scripts/setup-event.js` | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化 |
 | `scripts/event-status.js` | 当日の状況確認(件数・容量・期限までの残り・HDD の空き。読み取り専用) |
 | `scripts/requeue-failed.js` | 取り込みに失敗したファイルの確認と、`--apply` で `failed/` から取り込み待ちに戻す(件数と ID だけ表示) |

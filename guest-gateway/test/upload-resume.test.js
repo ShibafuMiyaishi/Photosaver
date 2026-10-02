@@ -450,4 +450,17 @@ describe('free space check', () => {
       String(half.length),
     );
   });
+
+  it('lets a chunk through (and logs) when the free-space check itself fails', async () => {
+    await startTight();
+    const { cookie } = await login(srv.baseUrl);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const created = await createRaw(srv.baseUrl, cookie, PNG.length);
+    expect(created.status).toBe(201);
+    vi.spyOn(fs, 'statfs').mockRejectedValue(new Error('EIO'));
+    expect((await patch(srv.baseUrl, cookie, created.location, 0, PNG)).status).toBe(204);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('upload_free_space_check_failed'),
+    );
+  });
 });
