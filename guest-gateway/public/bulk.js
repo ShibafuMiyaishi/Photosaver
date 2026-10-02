@@ -5,6 +5,7 @@
 //   共有シートに渡せないもの(大きな動画など)は、1 件ずつのダウンロード(「ファイル」アプリ)に回す。
 // - Android: 1 件ずつ取得して端末にダウンロードする(「ダウンロード」に保存され、ギャラリーや
 //   Google フォトに表示される)。共有シートには写真アプリへ保存する項目が無いため。
+//   ダウンロードに渡したファイルは 60 秒メモリに残すので、その合計が約 600 MB を超えないよう次の取得を待たせる。
 // - PC: 窓口が Immich の ZIP を中継する(約 2 GB ごとに分割)。
 // スマホでは保存済みをこの端末(ブラウザ)に記録し、次回は続きから。自分が送ったものは既定で除外する。
 
@@ -23,8 +24,14 @@ const ERROR_ATTEMPTS = 6;
 const MAX_BACKOFF_MS = 30_000;
 // This many items in a row that could not be fetched stop the run (gateway or Immich trouble).
 const STOP_AFTER_FAILURES = 3;
-// Blob URLs handed to the Android download manager are kept this long before release.
+// Blob URLs handed to the Android download manager are kept this long before release (the
+// download must have started reading the blob by then).
 const BLOB_URL_TTL_MS = 60_000;
+// Cap on the files those live blob URLs keep in memory: the next file waits until enough older
+// URLs have been released, so a run of large videos cannot pile up gigabytes in the tab.
+export const LIVE_BLOB_BUDGET_BYTES = 600 * 1024 ** 2;
+// Room needed before the next fetch (most photos fit; a bigger file waits once more for room).
+const MIN_FETCH_ROOM_BYTES = 50 * 1024 ** 2;
 const SAVED_KEY = 'gw-saved-v1';
 // Types for the share sheet when the relay could not label a file (it sends octet-stream then).
 const TYPE_BY_EXTENSION = {
@@ -164,6 +171,11 @@ export async function fetchOriginal(asset, { signal, maxBytes = Infinity } = {})
       continue;
     }
     if (res.status === 401) throw new BulkError('unauthorized');
+    // The event is over.
+    if (res.status === 410) {
+      await res.body?.cancel().catch(() => {});
+      throw new BulkError('closed');
+    }
     // Deleted meanwhile: nothing to save.
     if (res.status === 404) return { missing: true };
     if (!res.ok) {
@@ -221,8 +233,73 @@ export function canShareToPhotos(file) {
   }
 }
 
-/** Hand a file to the browser's download manager (Android: Downloads → gallery). */
-function downloadBlob(file) {
+/**
+ * Keeps track of blob URLs handed to the download manager: each is released after `ttlMs`, and
+ * `waitFor` holds the next file back while the live ones would exceed `budget`.
+ * @param {{ budget?: number, ttlMs?: number, revoke?: (url: string) => void }} [options]
+ */
+export function createBlobHolder({
+  budget = LIVE_BLOB_BUDGET_BYTES,
+  ttlMs = BLOB_URL_TTL_MS,
+  revoke = (url) => URL.revokeObjectURL(url),
+} = {}) {
+  let live = 0;
+  let waiters = [];
+
+  function wake() {
+    const list = waiters;
+    waiters = [];
+    for (const resolve of list) resolve();
+  }
+
+  return {
+    get liveBytes() {
+      return live;
+    },
+    /** Bytes that still fit next to the live URLs. */
+    room() {
+      return Math.max(0, budget - live);
+    },
+    /** True when a file of `bytes` has to wait (never when nothing is held: it goes alone). */
+    mustWait(bytes) {
+      return live > 0 && live + bytes > budget;
+    },
+    /** @param {string} url @param {number} size */
+    hold(url, size) {
+      live += size;
+      setTimeout(() => {
+        revoke(url);
+        live -= size;
+        wake();
+      }, ttlMs);
+    },
+    /**
+     * Resolves once `bytes` more fit the budget (or nothing is held any more).
+     * @param {number} bytes
+     * @param {AbortSignal} [signal] aborting rejects with BulkError('stopped')
+     */
+    async waitFor(bytes, signal) {
+      while (this.mustWait(bytes)) {
+        if (signal?.aborted) throw new BulkError('stopped');
+        await new Promise((resolve, reject) => {
+          const onAbort = () => reject(new BulkError('stopped'));
+          signal?.addEventListener('abort', onAbort, { once: true });
+          waiters.push(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          });
+        });
+      }
+    },
+  };
+}
+
+/**
+ * Hand a file to the browser's download manager (Android: Downloads → gallery).
+ * @param {File} file
+ * @param {ReturnType<typeof createBlobHolder>} holder releases the URL later
+ */
+function downloadBlob(file, holder) {
   const url = URL.createObjectURL(file);
   const link = document.createElement('a');
   link.href = url;
@@ -230,7 +307,7 @@ function downloadBlob(file) {
   document.body.append(link);
   link.click();
   link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_TTL_MS);
+  holder.hold(url, file.size);
 }
 
 /** Plain download by navigation (no memory use); iOS puts it in the Files app. */
@@ -274,11 +351,14 @@ const MANUAL_NOTE = {
  *   api: (path: string, options?: RequestInit) => Promise<Response>,
  *   getAssets: () => object[],
  *   onUnauthorized: () => void,
+ *   onClosed: () => void,
  * }} deps
  */
-export function initBulk({ api, getAssets, onUnauthorized }) {
+export function initBulk({ api, getAssets, onUnauthorized, onClosed }) {
   const mode = saveMode();
   let controller = null;
+  // Android: blob URLs still handed to the download manager (shared by all runs of this visit).
+  const blobs = createBlobHolder();
   let wakeLock = null;
   // Share mode: the prepared batch waiting for the guest's tap.
   let batch = [];
@@ -375,6 +455,14 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
 
   function handleError(err) {
     const reason = err instanceof BulkError ? err.message : '';
+    if (reason === 'closed') {
+      // The page is being replaced by the closed notice: just stop.
+      controller?.abort();
+      controller = null;
+      releaseScreen();
+      onClosed();
+      return;
+    }
     setIdle();
     if (reason === 'unauthorized') {
       status('');
@@ -531,15 +619,29 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
     status('ダウンロードしています…');
     const total = queue.length;
     let done = 0;
+    // Earlier files' blob URLs are released after a while; until then the next one waits.
+    const waitForRoom = async (bytes) => {
+      if (!blobs.mustWait(bytes)) return;
+      if (!controller) throw new BulkError('stopped');
+      progress(`ダウンロード中… ${done + 1} / ${total} 件(前のファイルの受け渡しを待っています)`);
+      await blobs.waitFor(bytes, controller.signal);
+      progress(`ダウンロード中… ${done + 1} / ${total} 件`);
+    };
     while (queue.length > 0) {
       const asset = queue.shift();
       progress(`ダウンロード中… ${done + 1} / ${total} 件`);
-      const result = await fetchForRun(asset, DOWNLOAD_MAX_FILE_BYTES);
+      await waitForRoom(MIN_FETCH_ROOM_BYTES);
+      let result = await fetchForRun(asset, Math.min(DOWNLOAD_MAX_FILE_BYTES, blobs.room()));
+      // Too large only for the room left now: wait until enough is released, then fetch again.
+      if (result.tooLarge && result.size <= DOWNLOAD_MAX_FILE_BYTES) {
+        await waitForRoom(result.size);
+        result = await fetchForRun(asset, DOWNLOAD_MAX_FILE_BYTES);
+      }
       if (result.tooLarge) {
         manual.push(asset);
         renderManual();
       } else if (result.blob) {
-        downloadBlob(fileFor(asset, result.blob));
+        downloadBlob(fileFor(asset, result.blob), blobs);
         markSaved([asset.id]);
         saved += 1;
       }
@@ -583,7 +685,9 @@ export function initBulk({ api, getAssets, onUnauthorized }) {
         `全 ${formatSize(plan.totalSize)}。` +
           (plan.parts.length > 1 ? '1 つずつダウンロードしてください(同時に 2 つまで)。' : ''),
       );
-    } catch {
+    } catch (err) {
+      // 'closed': api() has replaced the page with the closed notice.
+      if (err?.message === 'closed') return;
       status('ZIP を準備できませんでした。もう一度お試しください。');
     } finally {
       button.disabled = false;
