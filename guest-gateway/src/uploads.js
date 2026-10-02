@@ -1,8 +1,13 @@
 // guest-gateway/src/uploads.js
-// tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・空き容量を検査し、
-// 受信完了時にファイルの中身(マジックバイト)を判定して計測ログを出す。
+// tus(分割・再開可能アップロード)の受信。受付前に拡張子・サイズ・HDD の空き容量を
+// 検査し(空き容量は送信中も分割ごとに下限の半分を切っていないか確認する)、受信完了時に
+// ファイルの中身(マジックバイト)を判定して計測ログを出す。中身と拡張子が食い違う
+// 正直なファイル(.jpg の HEIC など)は、Immich に渡すファイル名の拡張子を中身に合わせて直す。
+// 受信途中のアップロードは開始した端末からしか再開できない(別の端末には存在しないのと同じ 404)。
 // 取り込みモードでは完了したファイルをステージング内の importing/ に移し、onReceived で
 // 取り込みキューに渡す(取り込みを諦めたファイルは取り込みキューが failed/ に移して残す)。
+// 受信済みのアップロードへの再開確認(HEAD)には「完了済み」と答え、同じファイルを送り直させない。
+// 起動時には、受信は終わったのに完了処理の前に止まったファイルを拾い直す(reconcile)。
 // 速度検証モードでは受信後に削除する(KEEP_UPLOADS=true のときは kept/ に移して残す)。
 
 import fs from 'node:fs/promises';
@@ -10,7 +15,28 @@ import path from 'node:path';
 import { Server } from '@tus/server';
 import { FileStore } from '@tus/file-store';
 import { fileTypeFromFile } from 'file-type';
+import { SAFE_ID } from './importer.js';
 import { log } from './log.js';
+
+// Detected content type → extensions that belong to it; the first one is canonical (used when
+// the file's own extension does not match its content). Every extension here must also be in
+// ALLOWED_EXTENSIONS. Within one family (jpg/jpeg, heic/heif, mp4/m4v) any member is accepted.
+export const EXTENSIONS_BY_MIME = {
+  'image/jpeg': ['jpg', 'jpeg'],
+  'image/png': ['png'],
+  'image/webp': ['webp'],
+  'image/gif': ['gif'],
+  'image/heic': ['heic', 'heif'],
+  'image/heif': ['heif', 'heic'],
+  'image/heic-sequence': ['heic', 'heif'],
+  'image/heif-sequence': ['heif', 'heic'],
+  'image/avif': ['avif'],
+  'video/quicktime': ['mov'],
+  'video/mp4': ['mp4', 'm4v'],
+  'video/x-m4v': ['m4v', 'mp4'],
+  'video/3gpp': ['3gp'],
+  'video/3gpp2': ['3gp'],
+};
 
 export const ALLOWED_EXTENSIONS = new Set([
   'jpg',
@@ -27,26 +53,20 @@ export const ALLOWED_EXTENSIONS = new Set([
   '3gp',
 ]);
 
-export const ALLOWED_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/gif',
-  'image/heic',
-  'image/heif',
-  'image/heic-sequence',
-  'image/heif-sequence',
-  'image/avif',
-  'video/quicktime',
-  'video/mp4',
-  'video/x-m4v',
-  'video/3gpp',
-  'video/3gpp2',
-]);
+export const ALLOWED_MIME_TYPES = new Set(Object.keys(EXTENSIONS_BY_MIME));
+
+// Image formats stored in an ISO base media (ftyp) container. file-type reports `video/mp4` for
+// every ftyp brand it does not list (HEIF brands such as mif2, heim, heis, avci, MiHE), so a
+// `video/mp4` detection says nothing about whether such a file is a video.
+const ISOBMFF_IMAGE_EXTENSIONS = new Set(['heic', 'heif', 'avif']);
 
 // tus counts expiry from creation, so this must outlast the slowest large upload.
 // Staging is purged at CLOSES_AT anyway.
 const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
+// Same status and body as @tus/utils ERRORS.FILE_NOT_FOUND, so an upload of another device looks
+// exactly like one that does not exist.
+const NOT_FOUND = { status_code: 404, body: 'The file for this url was not found\n' };
+const UPLOAD_PATH = /^\/files\/([A-Za-z0-9_-]{1,128})\/?$/;
 
 // Finished files live outside the tus-managed entries so tus expiry never touches them
 // (@tus/file-store only expires top-level `<id>` files that have an `<id>.json` next to them):
@@ -70,6 +90,24 @@ export function sanitizeFilename(name) {
 export function extensionOf(filename) {
   const dot = filename.lastIndexOf('.');
   return dot > 0 ? filename.slice(dot + 1).toLowerCase() : '';
+}
+
+/**
+ * The name to give Immich for a file whose content was detected as `mime` (an allowed type).
+ * Immich picks its image/video pipeline by extension, so a name whose extension does not belong
+ * to the content (an MP4 called .png, a HEIC called .jpg by a messaging app) gets the canonical
+ * extension of the detected type instead. Returns the name unchanged when it already fits, and
+ * keeps a HEIF/AVIF name that file-type only recognised as some ISOBMFF file (`video/mp4`).
+ * @returns {{ filename: string, from: string, to: string } | null} null = no change needed
+ */
+export function correctExtension(filename, mime) {
+  const allowed = EXTENSIONS_BY_MIME[mime];
+  const ext = extensionOf(filename);
+  if (!allowed || allowed.includes(ext)) return null;
+  // Generic ISOBMFF detection: never turn an image (IMG.HEIC) into a video (IMG.mp4).
+  if (mime === 'video/mp4' && ISOBMFF_IMAGE_EXTENSIONS.has(ext)) return null;
+  const base = ext ? filename.slice(0, -(ext.length + 1)) : filename;
+  return { filename: `${base}.${allowed[0]}`, from: ext, to: allowed[0] };
 }
 
 function reject(status_code, body) {
@@ -124,6 +162,10 @@ async function freeBytes(dir) {
   return stats.bavail * stats.bsize;
 }
 
+async function isFile(filePath) {
+  return (await fs.stat(filePath).catch(() => null))?.isFile() ?? false;
+}
+
 /** Client-reported File.lastModified (ms) from tus metadata, or null if unusable. */
 function parseLastModified(value) {
   const n = Number(value);
@@ -131,27 +173,165 @@ function parseLastModified(value) {
 }
 
 /**
- * @param {ReturnType<import('./config.js').loadConfig>} config
- * @param {{ onReceived?: (file: {
- *   uploadId: string, deviceId: string, nickname: string, filename: string, mime: string,
- *   size: number, lastModified: number|null }) => void }} [hooks]
- *   onReceived switches on import mode: called after the file is in importing/<uploadId>.
+ * The tus uploads in the staging dir, read from disk: every top-level `<id>.json`
+ * (@tus/file-store's info file) with its declared size and how many bytes its data file holds
+ * (`received` is null when the data file is missing). Used by startup reconcile and by
+ * scripts/event-status.js (受信途中); never on the request path.
+ * @param {string} stagingDir
+ * @returns {Promise<Map<string, { size: number, received: number|null }>>}
  */
-export function createTusServer(config, { onReceived } = {}) {
+export async function scanStaging(stagingDir) {
+  const result = new Map();
+  const names = await fs.readdir(stagingDir).catch(() => []);
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const id = name.slice(0, -'.json'.length);
+    if (!SAFE_ID.test(id)) continue;
+    let info;
+    try {
+      info = JSON.parse(await fs.readFile(path.join(stagingDir, name), 'utf8'));
+    } catch {
+      continue; // being written or removed right now, or not ours
+    }
+    const size = Number(info?.size);
+    if (!Number.isSafeInteger(size) || size <= 0) continue;
+    const stat = await fs.stat(path.join(stagingDir, id)).catch(() => null);
+    result.set(id, { size, received: stat?.isFile() ? stat.size : null });
+  }
+  return result;
+}
+
+/**
+ * @param {ReturnType<import('./config.js').loadConfig>} config
+ * @param {{
+ *   onReceived?: (file: { uploadId: string, deviceId: string, nickname: string,
+ *     filename: string, mime: string, size: number, lastModified: number|null }) => void,
+ *   findReceived?: (uploadId: string) => { device_id: string, size: number, mime: string }
+ *     | undefined,
+ * }} [hooks]
+ *   onReceived switches on import mode: called after the file is in importing/<uploadId>.
+ *   findReceived (import mode): the recorded row of a received upload, for resume checks.
+ * @returns {Server & { reconcile: () => Promise<number> }} reconcile: call once at startup,
+ *   before accepting requests.
+ */
+export function createTusServer(config, { onReceived, findReceived } = {}) {
   const datastore = new FileStore({
     directory: config.stagingDir,
     expirationPeriodInMilliseconds: FORTY_EIGHT_HOURS_MS,
   });
 
-  /** Move a finished file out of tus' reach so expiry cleanup never deletes it. */
+  /**
+   * Move a finished file out of tus' reach so expiry cleanup never deletes it. The caller drops
+   * the info file (FileStore keeps it next to the data as `<id>.json`) once the move is complete.
+   */
   async function moveFinished(filePath, dirName, name) {
     const targetDir = path.join(config.stagingDir, dirName);
     await fs.mkdir(targetDir, { recursive: true });
     const target = path.join(targetDir, name);
     await fs.rename(filePath, target);
-    // FileStore keeps its info next to the file as `<id>.json`.
-    await fs.rm(`${filePath}.json`, { force: true });
     return target;
+  }
+
+  /** Detected type and the name to give Immich (extension fitted to the content). */
+  async function inspect(uploadId, filePath, metadata) {
+    const detected = await fileTypeFromFile(filePath).catch(() => undefined);
+    const mime = detected?.mime ?? 'unknown';
+    // Sanitized and extension-checked in onUploadCreate.
+    let filename = metadata?.filename ?? '';
+    const corrected = ALLOWED_MIME_TYPES.has(mime) ? correctExtension(filename, mime) : null;
+    if (corrected) {
+      filename = corrected.filename;
+      log('info', 'ext_corrected', { id: uploadId, from: corrected.from, to: corrected.to, mime });
+    }
+    return { mime, filename };
+  }
+
+  function record(upload, mime, filename) {
+    onReceived({
+      uploadId: upload.id,
+      deviceId: upload.metadata?.deviceId ?? '',
+      nickname: upload.metadata?.nickname ?? '',
+      filename,
+      mime,
+      size: upload.size,
+      lastModified: parseLastModified(upload.metadata?.lastModified),
+    });
+  }
+
+  /**
+   * Everything that happens once all bytes are in (the finish hook, and startup reconcile for
+   * uploads whose finish never ran). Throws a tus response when the content is not allowed.
+   * @returns {Promise<string>} detected MIME type
+   */
+  async function finishUpload(upload, { reconciled = false } = {}) {
+    const filePath = upload.storage?.path ?? path.join(config.stagingDir, upload.id);
+    const { mime, filename } = await inspect(upload.id, filePath, upload.metadata);
+    const elapsedMs = Date.now() - Date.parse(upload.creation_date ?? '');
+    const metrics = {
+      id: upload.id,
+      size: upload.size,
+      ext: extensionOf(upload.metadata?.filename ?? ''),
+      declaredType: upload.metadata?.filetype ?? '',
+      detectedType: mime,
+      elapsedMs: Number.isFinite(elapsedMs) ? elapsedMs : null,
+      mbps:
+        Number.isFinite(elapsedMs) && elapsedMs > 0
+          ? Number(((upload.size * 8) / elapsedMs / 1000).toFixed(2))
+          : null,
+      ...(reconciled ? { reconciled: true } : {}),
+    };
+
+    if (!ALLOWED_MIME_TYPES.has(mime)) {
+      await datastore.remove(upload.id).catch(() => {});
+      log('warn', 'upload_rejected_content', metrics);
+      throw reject(415, 'File content is not an allowed photo or video');
+    }
+
+    log('info', 'upload_finished', metrics);
+    if (onReceived) {
+      // Errors here surface as a 500 (guardHook) so the guest sees the upload as failed.
+      let importPath;
+      try {
+        importPath = await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
+      } catch (err) {
+        // A complete upload left in place would answer tus' retry HEAD with offset == length,
+        // and the client would report success for a file that is never imported. Drop it so
+        // the HEAD gets 404 and the client sends the file again.
+        await datastore.remove(upload.id).catch(() => {});
+        throw err;
+      }
+      // Record before dropping the info file: a crash in between leaves `<id>.json` next to a
+      // recorded row, which startup reconcile simply removes (the other order could lose the
+      // file in importing/ forever, and a resume HEAD in that window re-sent the whole file).
+      try {
+        record(upload, mime, filename);
+      } catch (err) {
+        // Not recorded = never imported and never resumed: do not leave an orphan behind, and
+        // drop the info file so the client's HEAD gets 404 and it sends the file again.
+        await fs.rm(importPath, { force: true });
+        await fs.rm(`${filePath}.json`, { force: true });
+        throw err;
+      }
+      // Recorded and queued: the upload succeeded. A leftover info file is harmless (the
+      // resume HEAD is answered from the row; startup reconcile removes it).
+      await fs.rm(`${filePath}.json`, { force: true }).catch((err) => {
+        log('error', 'staging_info_remove_failed', { id: upload.id, error: err.message });
+      });
+    } else if (config.keepUploads) {
+      try {
+        const ext = extensionOf(filename) || 'bin';
+        const keptPath = await moveFinished(filePath, KEPT_DIR_NAME, `${upload.id}.${ext}`);
+        await fs.rm(`${filePath}.json`, { force: true });
+        log('info', 'upload_kept', { id: upload.id, file: path.basename(keptPath) });
+      } catch (err) {
+        log('error', 'staging_keep_failed', { id: upload.id, error: err.message });
+      }
+    } else {
+      await datastore.remove(upload.id).catch((err) => {
+        log('error', 'staging_remove_failed', { id: upload.id, error: err.message });
+      });
+    }
+    return mime;
   }
 
   const server = new Server({
@@ -171,6 +351,42 @@ export function createTusServer(config, { onReceived } = {}) {
       return { status_code: 500, body: 'Internal error\n' };
     },
 
+    // Uploads are bound to the device that created them: for anyone else an existing upload
+    // answers exactly like a missing one. After a re-login (new deviceId) tus-js-client gets
+    // 404 on its resume HEAD, drops the stored URL and creates a fresh upload for the new device.
+    onIncomingRequest: guardHook('incoming', reject(500, 'Internal error'), async (req, id) => {
+      if (req.method === 'POST') return; // creation: the id is new
+      const info = await datastore.configstore.get(id);
+      if (!info) return; // tus answers 404 itself
+      const session = nodeRequest(req)?.gwSession;
+      if (!session?.deviceId || info.metadata?.deviceId !== session.deviceId) {
+        log('warn', 'upload_device_mismatch', {
+          id,
+          method: req.method,
+          device: session?.deviceShort,
+        });
+        throw NOT_FOUND;
+      }
+      // Hard floor for each chunk: the create-time check only sees what is free at that moment,
+      // so many large uploads running at once could each pass it and together fill the HDD
+      // (which stalls Immich too). Half of MIN_FREE_GB leaves room for chunks already being
+      // written; one statfs per PATCH (chunks are up to 50 MB) is cheap.
+      // If statfs itself fails, let the chunk through and log it: the create-time check and the
+      // mount-marker check still guard the disk, and failing every PATCH with 500 would not help.
+      if (req.method === 'PATCH') {
+        let free = Infinity;
+        try {
+          free = await freeBytes(config.stagingDir);
+        } catch (err) {
+          log('warn', 'upload_free_space_check_failed', { id, error: err.message });
+        }
+        if (free < config.minFreeBytes / 2) {
+          log('warn', 'upload_rejected_disk_full', { id, phase: 'patch' });
+          throw reject(507, 'Server storage is full');
+        }
+      }
+    }),
+
     onUploadCreate: guardHook('create', reject(503, 'Storage unavailable'), async (req, upload) => {
       if (upload.sizeIsDeferred || !Number.isFinite(upload.size) || upload.size <= 0) {
         throw reject(400, 'Upload-Length is required');
@@ -183,8 +399,11 @@ export function createTusServer(config, { onReceived } = {}) {
         log('warn', 'upload_rejected_mount_marker_missing', { size: upload.size });
         throw reject(503, 'Storage unavailable');
       }
+      // Only what is free right now: bytes that uploads in progress will still write are not
+      // subtracted (a guest could otherwise block everyone by declaring large uploads and never
+      // sending them). MIN_FREE_GB is sized to absorb several large uploads arriving at once.
       if ((await freeBytes(config.stagingDir)) < upload.size + config.minFreeBytes) {
-        log('warn', 'upload_rejected_disk_full', { size: upload.size });
+        log('warn', 'upload_rejected_disk_full', { size: upload.size, phase: 'create' });
         throw reject(507, 'Server storage is full');
       }
       const session = nodeRequest(req)?.gwSession;
@@ -207,75 +426,100 @@ export function createTusServer(config, { onReceived } = {}) {
 
     // v2 calls this as (req, upload); the README still documents the old (req, res, upload).
     onUploadFinish: guardHook('finish', reject(500, 'Internal error'), async (_req, upload) => {
-      const filePath = upload.storage?.path ?? path.join(config.stagingDir, upload.id);
-      const detected = await fileTypeFromFile(filePath).catch(() => undefined);
-      const mime = detected?.mime ?? 'unknown';
-      const elapsedMs = Date.now() - Date.parse(upload.creation_date ?? '');
-      const metrics = {
-        id: upload.id,
-        size: upload.size,
-        ext: extensionOf(upload.metadata?.filename ?? ''),
-        declaredType: upload.metadata?.filetype ?? '',
-        detectedType: mime,
-        elapsedMs: Number.isFinite(elapsedMs) ? elapsedMs : null,
-        mbps:
-          Number.isFinite(elapsedMs) && elapsedMs > 0
-            ? Number(((upload.size * 8) / elapsedMs / 1000).toFixed(2))
-            : null,
-      };
-
-      if (!ALLOWED_MIME_TYPES.has(mime)) {
-        await datastore.remove(upload.id).catch(() => {});
-        log('warn', 'upload_rejected_content', metrics);
-        throw reject(415, 'File content is not an allowed photo or video');
-      }
-
-      log('info', 'upload_finished', metrics);
-      if (onReceived) {
-        // Errors here surface as a 500 (guardHook) so the guest sees the upload as failed.
-        let importPath;
-        try {
-          importPath = await moveFinished(filePath, IMPORT_DIR_NAME, upload.id);
-        } catch (err) {
-          // A complete upload left in place would answer tus' retry HEAD with offset == length,
-          // and the client would report success for a file that is never imported. Drop it so
-          // the HEAD gets 404 and the client sends the file again.
-          await datastore.remove(upload.id).catch(() => {});
-          throw err;
-        }
-        try {
-          onReceived({
-            uploadId: upload.id,
-            deviceId: upload.metadata?.deviceId ?? '',
-            nickname: upload.metadata?.nickname ?? '',
-            // Sanitized and extension-checked in onUploadCreate.
-            filename: upload.metadata?.filename ?? '',
-            mime,
-            size: upload.size,
-            lastModified: parseLastModified(upload.metadata?.lastModified),
-          });
-        } catch (err) {
-          // Not recorded = never imported and never resumed: do not leave an orphan behind.
-          await fs.rm(importPath, { force: true });
-          throw err;
-        }
-      } else if (config.keepUploads) {
-        try {
-          const ext = extensionOf(upload.metadata?.filename ?? '') || 'bin';
-          const keptPath = await moveFinished(filePath, KEPT_DIR_NAME, `${upload.id}.${ext}`);
-          log('info', 'upload_kept', { id: upload.id, file: path.basename(keptPath) });
-        } catch (err) {
-          log('error', 'staging_keep_failed', { id: upload.id, error: err.message });
-        }
-      } else {
-        await datastore.remove(upload.id).catch((err) => {
-          log('error', 'staging_remove_failed', { id: upload.id, error: err.message });
-        });
-      }
+      const mime = await finishUpload(upload);
       return { headers: { 'X-GW-Detected-Type': mime } };
     }),
   });
 
+  /** The recorded row of an upload this device finished (and that left staging), or null. */
+  function receivedByCaller(req) {
+    if (!findReceived || req.method !== 'HEAD' || !req.headers['tus-resumable']) return null;
+    const id = UPLOAD_PATH.exec(new URL(req.url, 'http://gateway.invalid').pathname)?.[1];
+    if (!id) return null;
+    let row;
+    try {
+      row = findReceived(id);
+    } catch (err) {
+      // Fall back to tus (404): the client then sends the file again, which is safe.
+      log('error', 'upload_lookup_failed', { id, error: err?.message });
+      return null;
+    }
+    const deviceId = req.gwSession?.deviceId;
+    return row && deviceId && row.device_id === deviceId ? row : null;
+  }
+
+  // tus-js-client retries a PATCH whose response was lost with a HEAD. If that PATCH finished
+  // the upload, the file has already left staging (importing/, then Immich), so tus alone would
+  // answer 404 and the client would send the whole file again. Answer "complete" instead
+  // (offset == length → tus-js-client reports success without sending anything). Uploads
+  // dropped because the move failed have no row and still get tus' 404.
+  const handleTus = server.handle.bind(server);
+  server.handle = async (req, res) => {
+    const row = receivedByCaller(req);
+    if (!row) return handleTus(req, res);
+    res.writeHead(200, {
+      'Tus-Resumable': '1.0.0',
+      'Upload-Offset': String(row.size),
+      'Upload-Length': String(row.size),
+      'Cache-Control': 'no-store',
+      'X-GW-Detected-Type': row.mime,
+    });
+    res.end();
+    return undefined;
+  };
+
+  /**
+   * Startup repair for a crash between the last write and the end of the finish hook:
+   * - all bytes in, finish never ran → run it now (import, or the speed-test handling);
+   * - data already moved to importing/ but `<id>.json` left behind → record it if it is not
+   *   recorded yet, then drop the info file;
+   * - incomplete uploads stay as they are (the client resumes them).
+   * Idempotent; logs each repair. Returns how many uploads it finished or recorded.
+   */
+  async function reconcile() {
+    let repaired = 0;
+    for (const [id, { size, received }] of await scanStaging(config.stagingDir)) {
+      try {
+        if (received === size) {
+          // A rejected content type throws (415) after removing the upload, like the live hook.
+          const upload = await datastore.getUpload(id);
+          await finishUpload(upload, { reconciled: true });
+          repaired += 1;
+          log('info', 'staging_reconciled', { id, action: 'finished' });
+        } else if (received === null) {
+          const infoPath = path.join(config.stagingDir, `${id}.json`);
+          const importPath = path.join(config.stagingDir, IMPORT_DIR_NAME, id);
+          let action = 'info_removed';
+          if (onReceived && (await isFile(importPath)) && !findReceived?.(id)) {
+            const info = JSON.parse(await fs.readFile(infoPath, 'utf8'));
+            const { mime, filename } = await inspect(id, importPath, info.metadata);
+            if (!ALLOWED_MIME_TYPES.has(mime) || (await fs.stat(importPath)).size !== size) {
+              // Not something the finish hook would have accepted: leave it for the operator.
+              log('warn', 'staging_reconcile_skipped', { id, detectedType: mime });
+              continue;
+            }
+            record({ id, size, metadata: info.metadata }, mime, filename);
+            repaired += 1;
+            action = 'recorded';
+          }
+          // The data is gone or already handled: the info file alone is useless (and would make
+          // tus answer 410 instead of 404).
+          await fs.rm(infoPath, { force: true });
+          log('info', 'staging_reconciled', { id, action });
+        }
+      } catch (err) {
+        if (isTusResponse(err)) {
+          // Content not allowed: removed and logged (upload_rejected_content) like a live finish.
+          log('info', 'staging_reconciled', { id, action: 'rejected' });
+        } else {
+          log('error', 'staging_reconcile_failed', { id, error: err?.message });
+        }
+      }
+    }
+    return repaired;
+  }
+
+  server.reconcile = reconcile;
   return server;
 }
 

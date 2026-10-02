@@ -5,7 +5,8 @@
 // 原寸の先読みはしない(ゲスト全員が見るだけで数 GB になるため)。「まとめて保存」も bulk.js。
 // サムネイルは画面に近いものから同時 12 件までに絞って読み込む(窓口の同時配信上限 48 より十分下)。
 // 動画は表示中のスライドだけが通信する(窓口の動画・原寸の上限は端末あたり 4 本)。
-// 削除は自分の投稿(管理者モードなら全件)だけ、2 回タップで確定。Immich のゴミ箱へ移る。
+// 削除は自分の投稿(管理者モードならこのページから上がった全件)だけ、2 回タップで確定。Immich のゴミ箱へ移る。
+// 削除できるかはサーバーが写真ごとに返す(deletable。無い古いサーバーでは従来どおり判定)。
 
 import PhotoSwipeLightbox from '/vendor/photoswipe/photoswipe-lightbox.esm.min.js';
 import {
@@ -39,6 +40,7 @@ let lightbox = null;
 let loadedAt = 0;
 let loading = null;
 let onUnauthorized = () => {};
+let onClosed = () => {};
 let apiFetch = null;
 // { role, canDelete } from the session.
 let permissions = { role: 'guest', canDelete: false };
@@ -137,7 +139,7 @@ const thumbObserver = new IntersectionObserver(
 );
 
 function listSignature(list) {
-  return list.map((a) => `${a.id}:${a.mine ? 1 : 0}:${a.by ?? ''}`).join('|');
+  return list.map((a) => `${a.id}:${a.mine ? 1 : 0}:${a.deletable ?? ''}:${a.by ?? ''}`).join('|');
 }
 
 /** Show a fresh listing; an unchanged one keeps the current tiles (and their scroll position). */
@@ -310,6 +312,11 @@ async function onSave(button, asset) {
       onUnauthorized();
       return;
     }
+    if (err instanceof BulkError && err.message === 'closed') {
+      lightbox.pswp?.close();
+      onClosed();
+      return;
+    }
     noteFor(asset, '取得できませんでした。もう一度お試しください');
   } finally {
     preparingId = null;
@@ -320,8 +327,24 @@ async function onSave(button, asset) {
   }
 }
 
+const NOT_DELETABLE_HERE_TEXT =
+  'この写真はここでは削除できません(Immich アプリから追加された写真です)';
+
+/**
+ * Note shown when the viewer moves to `asset`: in admin mode, say why 削除 is missing for a photo
+ * that did not come through this page (otherwise the button would just silently be absent).
+ */
+function initialNote(asset) {
+  return permissions.role === 'admin' && asset.deletable === false ? NOT_DELETABLE_HERE_TEXT : '';
+}
+
 function canDeleteAsset(asset) {
-  return permissions.canDelete && (asset.mine || permissions.role === 'admin');
+  // Without the delete key the server answers every DELETE with 404, which the page would
+  // take for "already gone" and report as deleted.
+  if (!permissions.canDelete) return false;
+  // The server decides per asset (`deletable`); older servers leave it out.
+  if (typeof asset.deletable === 'boolean') return asset.deletable;
+  return asset.mine || permissions.role === 'admin';
 }
 
 // Ids deleted in this session: hidden from every listing, including one that was already in
@@ -357,6 +380,14 @@ async function onDelete(button, asset) {
       return;
     }
     if (res.status === 403) {
+      const { error } = await res.json().catch(() => ({}));
+      if (error === 'not_deletable') {
+        // Admin mode, but the asset did not come through this page: hide the button for it.
+        asset.deletable = false;
+        button.hidden = true;
+        noteFor(asset, NOT_DELETABLE_HERE_TEXT);
+        return;
+      }
       noteFor(asset, 'この写真は削除できません(自分の端末から上げた写真だけ削除できます)');
       return;
     }
@@ -470,7 +501,7 @@ function setupLightbox() {
           // refreshSlideContent also fires 'change'; only a real slide change clears the note.
           if (pswp.currIndex !== shownIndex) {
             shownIndex = pswp.currIndex;
-            $('viewer-note').textContent = '';
+            $('viewer-note').textContent = initialNote(pswp.currSlide.data.asset);
           }
         });
       },
@@ -485,6 +516,8 @@ function setupLightbox() {
       html: '削除',
       onInit: (el, pswp) => {
         el.classList.add('gw-delete');
+        // 「削除」 → 「本当に削除」 is a state change screen readers should announce.
+        el.setAttribute('aria-live', 'polite');
         pswp.on('change', () => {
           const asset = pswp.currSlide.data.asset;
           el.hidden = !canDeleteAsset(asset);
@@ -562,13 +595,20 @@ async function refresh(api, { force = false } = {}) {
 /**
  * Wire the gallery tab; call once after login when the server reports `gallery: true`.
  * @param {(path: string, options?: RequestInit) => Promise<Response>} api
- * @param {{ onUnauthorized: () => void }} hooks session expired → back to the login screen
+ * @param {{ onUnauthorized: () => void, onClosed: () => void }} hooks session expired → back to
+ *   the login screen; event closed (410 on a direct fetch) → the closed page
  */
 export function initGallery(api, hooks) {
   onUnauthorized = hooks.onUnauthorized;
+  onClosed = hooks.onClosed;
   apiFetch = api;
   if (!lightbox) setupLightbox();
-  bulk ??= initBulk({ api, getAssets: () => assets, onUnauthorized: () => onUnauthorized() });
+  bulk ??= initBulk({
+    api,
+    getAssets: () => assets,
+    onUnauthorized: () => onUnauthorized(),
+    onClosed: () => onClosed(),
+  });
   $('gallery-refresh').onclick = () => refresh(api, { force: true });
   $('gallery-bulk').onclick = () => bulk.toggle();
   return {

@@ -1,6 +1,6 @@
 // guest-gateway/scripts/event-status.js
 // 当日の状況確認: 取り込みの記録(DB)を読み取り専用で開き、件数・容量・受付期限までの残り時間・
-// HDD の空きを表示する。ニックネームやファイル名は出さない(画面共有・報告にそのまま使える)。
+// HDD の空きと受信途中のアップロード(これから書き込む残り)を表示する。ニックネームやファイル名は出さない(画面共有・報告にそのまま使える)。
 // 動いている窓口コンテナの中で実行する(DB_PATH・CLOSES_AT・STAGING_DIR はコンテナの環境変数):
 //   docker exec guest_gateway node scripts/event-status.js
 
@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { openStore } from '../src/store.js';
+import { scanStaging } from '../src/uploads.js';
 
 // A pending row older than this means imports are stuck (normally done within seconds).
 export const STUCK_PENDING_MS = 10 * 60_000;
@@ -41,10 +42,13 @@ function formatDuration(ms) {
 
 /**
  * @param {ReturnType<ReturnType<typeof openStore>['stats']>} stats
- * @param {{ now: number, closesAt: number|null, freeBytes: number|null }} context
+ * @param {{ now: number, closesAt: number|null, freeBytes: number|null,
+ *   receiving?: { count: number, bytes: number }|null }} context receiving: uploads still
+ *   arriving in staging and the bytes they will still write (for information: the gateway's
+ *   free-space check does not reserve them; MIN_FREE_GB is the margin for them)
  * @returns {{ lines: string[], warnings: string[] }}
  */
-export function formatStatus(stats, { now, closesAt, freeBytes }) {
+export function formatStatus(stats, { now, closesAt, freeBytes, receiving = null }) {
   const lines = [];
   if (closesAt !== null) {
     lines.push(
@@ -59,6 +63,9 @@ export function formatStatus(stats, { now, closesAt, freeBytes }) {
   }
   lines.push(`投稿した端末: ${stats.devices}台`);
   lines.push(`窓口から削除: ${stats.deleted}件`);
+  if (receiving) {
+    lines.push(`受信途中: ${receiving.count}件 (あと${formatBytes(receiving.bytes)})`);
+  }
   if (freeBytes !== null) lines.push(`HDD の空き: ${formatBytes(freeBytes)}`);
 
   const warnings = [];
@@ -99,14 +106,24 @@ async function main(env) {
   }
   const closesAt = env.CLOSES_AT ? Date.parse(env.CLOSES_AT) : NaN;
   let freeBytes = null;
+  let receiving = null;
   if (env.STAGING_DIR) {
     const fsStats = await fs.statfs(env.STAGING_DIR).catch(() => null);
     if (fsStats) freeBytes = fsStats.bavail * fsStats.bsize;
+    // Uploads in progress, read from the top-level tus info files (display only).
+    const inProgress = [...(await scanStaging(env.STAGING_DIR)).values()].filter(
+      (u) => u.received !== null,
+    );
+    receiving = {
+      count: inProgress.length,
+      bytes: inProgress.reduce((sum, u) => sum + Math.max(0, u.size - u.received), 0),
+    };
   }
   const { lines, warnings } = formatStatus(stats, {
     now: Date.now(),
     closesAt: Number.isFinite(closesAt) ? closesAt : null,
     freeBytes,
+    receiving,
   });
   console.log(lines.join('\n'));
   for (const warning of warnings) console.log(`⚠️ ${warning}`);

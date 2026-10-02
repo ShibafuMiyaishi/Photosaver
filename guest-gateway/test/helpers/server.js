@@ -11,6 +11,9 @@ import { loadConfig } from '../../src/config.js';
 export const TMP_ROOT = path.resolve(import.meta.dirname, '../../../tmp/test-output/guest-gateway');
 export const PASSWORD = 'correct horse battery';
 export const NICKNAME = 'テスト太郎';
+// The lowest scrypt cost auth.js accepts: production's N=2^17 would make the many test logins
+// take ~0.3 s each.
+export const FAST_SCRYPT = { N: 2 ** 14, r: 8, p: 1 };
 
 let cachedHash;
 
@@ -19,7 +22,7 @@ let cachedHash;
  * @param {Parameters<typeof createApp>[1]} [deps] store/importer for import mode
  */
 export async function startServer(overrides = {}, deps = {}) {
-  cachedHash ??= await hashPassword(PASSWORD);
+  cachedHash ??= await hashPassword(PASSWORD, FAST_SCRYPT);
   const stagingDir = path.join(TMP_ROOT, crypto.randomUUID());
   await fs.mkdir(stagingDir, { recursive: true });
   const config = {

@@ -135,7 +135,74 @@ describe('upload store', () => {
     expect(store.wasDeleted(asset)).toBe(false);
   });
 
-  it('adds deleted_at to a database created before it existed', async () => {
+  it('tracks attempts whose outcome is unknown, stickily', () => {
+    store.add(ROW);
+    expect(store.hadAmbiguousAttempt('abc123')).toBe(false);
+    store.addAttempt('abc123');
+    // Still in flight (e.g. the process died during the upload) counts as ambiguous.
+    expect(store.hadAmbiguousAttempt('abc123')).toBe(true);
+    store.endAttempt('abc123', { ambiguous: false });
+    expect(store.hadAmbiguousAttempt('abc123')).toBe(false);
+
+    store.addAttempt('abc123');
+    store.endAttempt('abc123', { ambiguous: true });
+    store.addAttempt('abc123');
+    store.endAttempt('abc123', { ambiguous: false });
+    expect(store.get('abc123')).toMatchObject({ ambiguous: 1, in_flight: 0, attempts: 3 });
+    expect(store.hadAmbiguousAttempt('abc123')).toBe(true);
+    expect(store.hadAmbiguousAttempt('missing')).toBe(false);
+  });
+
+  it('turns an attempt left in flight by a crash into ambiguity on the next attempt', () => {
+    store.add(ROW);
+    store.addAttempt('abc123');
+    store.addAttempt('abc123'); // restart: the first attempt never ended
+    store.endAttempt('abc123', { ambiguous: false });
+    expect(store.get('abc123')).toMatchObject({ ambiguous: 1, in_flight: 0 });
+    store.markImported('abc123', 'duplicate', 'a1');
+    expect(store.get('abc123').in_flight).toBe(0);
+  });
+
+  it('knows whether any gateway upload created an asset', () => {
+    store.add(ROW);
+    store.markImported('abc123', 'duplicate', 'a1');
+    expect(store.isCreatedByAnyone('a1')).toBe(false);
+    store.add({ ...ROW, uploadId: 'u2', deviceId: 'dev-2' });
+    store.markImported('u2', 'created', 'a1');
+    expect(store.isCreatedByAnyone('a1')).toBe(true);
+  });
+
+  it('reverts a reclaimed created row when another row genuinely creates the asset', () => {
+    store.add(ROW);
+    store.add({ ...ROW, uploadId: 'u2', deviceId: 'dev-2' });
+    store.add({ ...ROW, uploadId: 'u3', deviceId: 'dev-3' });
+    expect(store.markImported('abc123', 'created', 'a1', { reclaimed: true })).toEqual([]);
+    expect(store.get('abc123')).toMatchObject({ status: 'created', reclaimed: 1 });
+    expect(store.isOwnAsset('a1', ROW.deviceId)).toBe(true);
+    // A plain duplicate for the asset changes nothing.
+    expect(store.markImported('u3', 'duplicate', 'a1')).toEqual([]);
+    expect(store.get('abc123').status).toBe('created');
+
+    expect(store.markImported('u2', 'created', 'a1')).toEqual(['abc123']);
+    expect(store.get('abc123')).toMatchObject({ status: 'duplicate', reclaimed: 0 });
+    expect(store.get('u2')).toMatchObject({ status: 'created', reclaimed: 0 });
+    expect(store.isOwnAsset('a1', ROW.deviceId)).toBe(false);
+    expect(store.isOwnAsset('a1', 'dev-2')).toBe(true);
+    expect(store.uploaders(['a1']).get('a1')).toEqual({
+      nickname: ROW.nickname,
+      deviceId: 'dev-2',
+    });
+  });
+
+  it('never reverts a genuine created row', () => {
+    store.add(ROW);
+    store.add({ ...ROW, uploadId: 'u2', deviceId: 'dev-2' });
+    store.markImported('abc123', 'created', 'a1');
+    expect(store.markImported('u2', 'created', 'a1')).toEqual([]);
+    expect(store.get('abc123').status).toBe('created');
+  });
+
+  it('adds later columns to a database created before they existed', async () => {
     const { DatabaseSync } = await import('node:sqlite');
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
@@ -154,8 +221,22 @@ describe('upload store', () => {
       migrated.markImported(ROW.uploadId, 'created', 'a1');
       migrated.markDeleted('a1');
       expect(migrated.wasDeleted('a1')).toBe(true);
+      expect(migrated.get(ROW.uploadId)).toMatchObject({
+        ambiguous: 0,
+        in_flight: 0,
+        reclaimed: 0,
+      });
+      migrated.addAttempt(ROW.uploadId);
+      expect(migrated.hadAmbiguousAttempt(ROW.uploadId)).toBe(true);
     } finally {
       migrated.close();
+    }
+    // Opening again (columns already there) changes nothing.
+    const reopened = openStore(file);
+    try {
+      expect(reopened.get(ROW.uploadId)).toMatchObject({ status: 'created', in_flight: 1 });
+    } finally {
+      reopened.close();
       await fs.rm(file, { force: true });
       await fs.rm(`${file}-wal`, { force: true });
       await fs.rm(`${file}-shm`, { force: true });

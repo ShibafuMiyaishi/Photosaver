@@ -316,5 +316,19 @@ export function createImmichClient({
       }
       await request('delete', 'assets', { method: 'DELETE', auth: 'delete', json: { ids } });
     },
+
+    /**
+     * Id of the album's owner (the event user, who also owns the delete key), or null when the
+     * response does not say. v3 has no `ownerId` on AlbumResponseDto: `albumUsers` lists the
+     * owner first with role `owner` (OpenAPI v3.2.4). Only the id is read; e-mails are ignored.
+     */
+    async albumOwnerId(albumId) {
+      if (!isUuid(albumId)) throw new ImmichError('album_owner', 0);
+      const res = await request('album_owner', `albums/${albumId}`, { auth: 'share' });
+      const data = await readJson('album_owner', res);
+      const users = Array.isArray(data?.albumUsers) ? data.albumUsers : [];
+      const owner = users.find((entry) => entry?.role === 'owner')?.user?.id;
+      return isUuid(owner) ? owner : null;
+    },
   };
 }

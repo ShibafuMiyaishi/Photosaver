@@ -130,6 +130,7 @@ describe('gallery relay', () => {
           filename: 'IMG_0001.HEIC',
           by: 'たろう',
           mine: true,
+          deletable: true,
         },
         {
           id: A2,
@@ -142,6 +143,7 @@ describe('gallery relay', () => {
           filename: 'IMG_0002.MOV',
           by: 'はなこ',
           mine: false,
+          deletable: false,
         },
         {
           id: A3,
@@ -154,6 +156,7 @@ describe('gallery relay', () => {
           filename: 'from-immich-app.jpg',
           by: null,
           mine: false,
+          deletable: false,
         },
       ],
     });
@@ -384,6 +387,67 @@ describe('gallery relay', () => {
     await expect.poll(() => pending.length).toBe(5);
     for (const release of pending) release();
     await Promise.all([...first, thumb]);
+  });
+
+  // Each login is a new device; requests from other addresses arrive via X-Forwarded-For
+  // (trust proxy = 1, as behind tailscaled's serve proxy).
+  async function devices(n) {
+    const cookies = [];
+    for (let i = 0; i < n; i += 1)
+      cookies.push((await login(srv.baseUrl, undefined, `d${i}`)).cookie);
+    return cookies;
+  }
+  const getAs = (device, ip, path) =>
+    fetch(`${srv.baseUrl}${path}`, {
+      headers: { Cookie: device, ...(ip ? { 'X-Forwarded-For': ip } : {}) },
+    });
+
+  it('caps thumbnails per address (75%) and in total, so new logins cannot take every slot', async () => {
+    const pending = holdMedia('image/webp');
+    const [d1, d2, d3, d4] = await devices(4);
+    const held = [];
+    for (const device of [d1, d2]) {
+      for (let i = 0; i < 48; i += 1) held.push(getAs(device, null, `/media/${A1}/thumbnail`));
+    }
+    await expect.poll(() => pending.length).toBe(96);
+    // A third device on the same address: its own budget is untouched, the address's is full.
+    const sameAddress = await getAs(d3, null, `/media/${A1}/thumbnail`);
+    expect(sameAddress.status).toBe(429);
+    expect(sameAddress.headers.get('retry-after')).toBe('2');
+    // Another address gets the remaining quarter of the pool...
+    for (let i = 0; i < 32; i += 1) held.push(getAs(d3, '203.0.113.7', `/media/${A1}/thumbnail`));
+    await expect.poll(() => pending.length).toBe(128);
+    // ...and then the global cap applies to everyone.
+    const full = await getAs(d4, '198.51.100.9', `/media/${A1}/thumbnail`);
+    expect(full.status).toBe(429);
+    expect(await full.json()).toEqual({ error: 'busy' });
+    for (const release of pending) release();
+    await Promise.all(held);
+    immich.media = () => new Response('x', { headers: { 'content-type': 'image/webp' } });
+    await expect
+      .poll(async () => (await getAs(d4, '198.51.100.9', `/media/${A1}/thumbnail`)).status)
+      .toBe(200);
+  });
+
+  it('caps originals/videos per address and in total', async () => {
+    const pending = holdMedia('video/mp4');
+    const cookies = await devices(9);
+    const held = [];
+    // 6 devices × 4 = 24 = the per-address cap.
+    for (const device of cookies.slice(0, 6)) {
+      for (let i = 0; i < 4; i += 1) held.push(getAs(device, null, `/media/${A2}/video`));
+    }
+    await expect.poll(() => pending.length).toBe(24);
+    expect((await getAs(cookies[6], null, `/media/${A2}/video`)).status).toBe(429);
+    for (const device of cookies.slice(6, 8)) {
+      for (let i = 0; i < 4; i += 1) held.push(getAs(device, '203.0.113.7', `/media/${A2}/video`));
+    }
+    await expect.poll(() => pending.length).toBe(32);
+    const full = await getAs(cookies[8], '198.51.100.9', `/media/${A1}/original`);
+    expect(full.status).toBe(429);
+    expect(full.headers.get('retry-after')).toBe('2');
+    for (const release of pending) release();
+    await Promise.all(held);
   });
 
   it('aborts the upstream transfer when the guest disconnects', async () => {

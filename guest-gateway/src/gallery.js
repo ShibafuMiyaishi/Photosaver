@@ -6,6 +6,8 @@
 // 除き、アルバムの件数に届かなければ並び順を変えて取り直して補い、安定ソートして短時間キャッシュする。
 // PC 向けの ZIP 一括ダウンロード: Immich に約 2 GB ごとの分割を計画させて窓口が保持し、各 ZIP は
 // ダウンロードの時点でアルバムにある写真だけに絞って Immich の ZIP 生成を中継する。
+// 同時転送数は端末ごと・接続元 IP ごと・全体の 3 段で制限する(ログインし直すと端末 ID が変わるため、
+// 端末ごとの上限だけでは 1 人が全枠を占有できる。会場では大勢が 1 つの IP を共有するので IP ごとは緩め)。
 
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -14,6 +16,7 @@ import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import express from 'express';
 import { isUuid, MEDIA_KINDS } from './immich.js';
+import { clientKey } from './lockout.js';
 import { log } from './log.js';
 
 const gzip = promisify(zlib.gzip);
@@ -35,22 +38,37 @@ const IMMICH_DISPOSITION = /^inline; filename\*=UTF-8''([A-Za-z0-9%._~!'()*-]{1,
 const INLINE_TYPE = /^(?:image\/(?!svg)[a-z0-9.+-]+|video\/[a-z0-9.+-]+)$/i;
 // Asset bytes never change for an id; browsers may keep them, but never past the deadline.
 const MEDIA_MAX_AGE_S = 86_400;
-// Parallel media responses (429 + Retry-After beyond these). Thumbnails/previews are small and
-// a grid over HTTP/2 asks for many at once; originals/videos hold an Immich connection and HDD
-// reads for long, so they get a small per-device share of a global pool.
+// Parallel media responses (429 + Retry-After beyond these), limited per device, per client
+// address (clientKey: IPv4, or the IPv6 /64) and in total. A new login means a new deviceId, so
+// per-device caps alone let one person take every slot; the per-address caps (75% of the global
+// pool) stop that while leaving most of the pool to a venue where ~100 guests share one Wi-Fi
+// address, and a quarter to guests elsewhere. The frontend retries 429s.
+// Thumbnails/previews are small and a grid over HTTP/2 asks for many at once; 128 in total keeps
+// Immich's thumbnail reads (and the gateway's open sockets) bounded on a 16 GB box shared with
+// Immich while still letting two or three phones fill a screen of tiles at once.
 const LIGHT_PER_DEVICE = 48;
+const LIGHT_PER_ADDRESS = 96;
+const LIGHT_TOTAL = 128;
+// Originals/videos hold an Immich connection and HDD reads for long: a small per-device share.
 const HEAVY_PER_DEVICE = 4;
-const HEAVY_STREAMS_TOTAL = 32;
+const HEAVY_PER_ADDRESS = 24;
+const HEAVY_TOTAL = 32;
 // A heavy stream that moves no bytes for this long (paused <video>, stalled or idle reader) is
 // closed so it cannot hold a slot forever; players re-request with Range when resumed.
 const HEAVY_IDLE_MS = 60_000;
 // ZIP parts: a ZIP is built on the fly and cannot be resumed, so parts stay moderate.
 const ZIP_PART_BYTES = 2 * 1024 ** 3;
 // A ZIP reads originals from the HDD for minutes; keep them few (beyond → busy page).
+// Per address: 75% of 4 = 3, so one address never holds every ZIP slot.
 const ZIP_PER_DEVICE = 2;
-const ZIP_STREAMS_TOTAL = 4;
-// One plan per device (a new one replaces it); old plans expire.
+const ZIP_PER_ADDRESS = 3;
+const ZIP_TOTAL = 4;
+// One plan per device (a new one replaces it); old plans expire. Logging in again gives a new
+// device, so plans are also capped per client address (a new one evicts that address's oldest):
+// one address cannot push other guests' plans out of the global bound. ZIPs are for PCs, so 50
+// is far more than a venue sharing one address needs; it takes 10 addresses to reach 500.
 const ZIP_PLAN_TTL_MS = 24 * 60 * 60_000;
+const ZIP_PLANS_PER_ADDRESS = 50;
 const MAX_ZIP_PLANS = 500;
 const PLAN_ID = /^[0-9a-f]{32}$/;
 const PART_NUMBER = /^[1-9][0-9]{0,3}$/;
@@ -70,8 +88,56 @@ function sendPage(res, status, message) {
     );
 }
 
-/** The only asset fields a guest needs (Immich also returns owner ids, internal paths, ...). */
-function toGuestAsset(asset, uploader, deviceId) {
+/**
+ * In-flight counter limited per device, per client address and in total.
+ * `acquire` returns an idempotent release function, or null when a limit is reached.
+ */
+function createSlots({ perDevice, perAddress, total }) {
+  const byDevice = new Map();
+  const byAddress = new Map();
+  let inFlight = 0;
+  const bump = (map, key, delta) => {
+    const next = (map.get(key) ?? 0) + delta;
+    if (next > 0) map.set(key, next);
+    else map.delete(key);
+  };
+  return {
+    acquire(deviceId, address) {
+      if (
+        inFlight >= total ||
+        (byDevice.get(deviceId) ?? 0) >= perDevice ||
+        (byAddress.get(address) ?? 0) >= perAddress
+      ) {
+        return null;
+      }
+      inFlight += 1;
+      bump(byDevice, deviceId, 1);
+      bump(byAddress, address, 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        inFlight -= 1;
+        bump(byDevice, deviceId, -1);
+        bump(byAddress, address, -1);
+      };
+    },
+  };
+}
+
+/** False only when both owner ids are known and differ. */
+function isEventOwned(asset, ownerId) {
+  return !ownerId || typeof asset.ownerId !== 'string' || asset.ownerId === ownerId;
+}
+
+/**
+ * The only asset fields a guest needs (Immich also returns owner ids, internal paths, ...).
+ * `deletable`: guest → their own upload (same as `mine`); admin → anything the event user owns
+ * (the delete key cannot trash what someone added with their own Immich account). When the
+ * owner is unknown, admin falls back to true and an Immich refusal becomes not_deletable.
+ */
+function toGuestAsset(asset, uploader, { deviceId, role, ownerId }) {
+  const mine = Boolean(uploader) && uploader.deviceId === deviceId;
   return {
     id: asset.id,
     type: asset.type === 'VIDEO' ? 'video' : 'image',
@@ -82,7 +148,8 @@ function toGuestAsset(asset, uploader, deviceId) {
     thumbhash: typeof asset.thumbhash === 'string' ? asset.thumbhash : null,
     filename: typeof asset.originalFileName === 'string' ? asset.originalFileName : null,
     by: uploader?.nickname ?? null,
-    mine: Boolean(uploader) && uploader.deviceId === deviceId,
+    mine,
+    deletable: role === 'admin' ? isEventOwned(asset, ownerId) : mine,
   };
 }
 
@@ -118,17 +185,54 @@ export function createGalleryRouter({
   // { at, promise } of the last full listing, shared by all guests. `at` is set when the
   // listing completes, so a slow listing stays single-flight until it is done.
   let cache = null;
-  // deviceId → { light, heavy } responses in flight.
-  const mediaInFlight = new Map();
-  let heavyInFlight = 0;
-  // planId → { deviceId, createdAt, parts: string[][] }; Map order = creation order.
+  // The event user's id (album owner): looked up when an admin first needs it; it never changes.
+  let ownerId = null;
+  let ownerLookup = null;
+  const mediaSlots = {
+    light: createSlots({
+      perDevice: LIGHT_PER_DEVICE,
+      perAddress: LIGHT_PER_ADDRESS,
+      total: LIGHT_TOTAL,
+    }),
+    heavy: createSlots({
+      perDevice: HEAVY_PER_DEVICE,
+      perAddress: HEAVY_PER_ADDRESS,
+      total: HEAVY_TOTAL,
+    }),
+  };
+  const zipSlots = createSlots({
+    perDevice: ZIP_PER_DEVICE,
+    perAddress: ZIP_PER_ADDRESS,
+    total: ZIP_TOTAL,
+  });
+  // planId → { deviceId, address, createdAt, parts: string[][] }; Map order = creation order.
   const zipPlans = new Map();
   // { at, promise } of the last Immich plan, shared by all guests for a short time: planning
   // queries the whole album, so repeated taps or scripts must not each hit Immich.
   let zipInfoCache = null;
-  // deviceId → ZIP streams in flight.
-  const zipInFlight = new Map();
-  let zipStreams = 0;
+
+  /** The event user's id, or null while Immich does not tell (callers then fall back). */
+  function eventOwnerId() {
+    if (ownerId) return Promise.resolve(ownerId);
+    if (!ownerLookup) {
+      // Single-flight; never rejects. A failed lookup is retried by the next caller.
+      const lookup = (async () => {
+        try {
+          const id = await immich.albumOwnerId(albumId);
+          if (id) ownerId = id;
+          else log('warn', 'album_owner_unknown', {});
+        } catch (err) {
+          log('warn', 'album_owner_unknown', { error: err.message });
+        }
+        return ownerId;
+      })();
+      ownerLookup = lookup;
+      lookup.then(() => {
+        if (ownerLookup === lookup) ownerLookup = null;
+      });
+    }
+    return ownerLookup;
+  }
 
   async function listPass(byId, direction) {
     let cursor = null;
@@ -187,9 +291,10 @@ export function createGalleryRouter({
       log('error', 'gallery_list_failed', { error: err.message });
       return res.status(502).json({ error: 'unavailable' });
     }
-    const { deviceId } = req.gwSession;
+    const { deviceId, role } = req.gwSession;
+    const viewer = { deviceId, role, ownerId: role === 'admin' ? await eventOwnerId() : null };
     const body = JSON.stringify({
-      assets: album.assets.map((a) => toGuestAsset(a, album.uploaders.get(a.id), deviceId)),
+      assets: album.assets.map((a) => toGuestAsset(a, album.uploaders.get(a.id), viewer)),
     });
     res.type('json');
     // Thousands of entries with repeated keys: compress (no compression middleware is used).
@@ -216,8 +321,13 @@ export function createGalleryRouter({
         log('error', 'gallery_list_failed', { error: err.message });
         return res.status(502).json({ error: 'unavailable' });
       }
-      if (!album.assets.some((a) => a.id === id))
-        return res.status(404).json({ error: 'not_found' });
+      const asset = album.assets.find((a) => a.id === id);
+      if (!asset) return res.status(404).json({ error: 'not_found' });
+      // Added by someone else (e.g. the organiser's own Immich account): the delete key belongs
+      // to the event user and cannot trash it. Say so instead of a misleading not_found.
+      if (!isEventOwned(asset, await eventOwnerId())) {
+        return res.status(403).json({ error: 'not_deletable' });
+      }
     } else if (!store.isOwnAsset(id, deviceId)) {
       return res.status(403).json({ error: 'forbidden' });
     }
@@ -225,6 +335,12 @@ export function createGalleryRouter({
       await immich.deleteAssets([id]);
     } catch (err) {
       const status = err.status ?? 0;
+      // The asset was in the listing a moment ago, so for the organiser Immich's 400 ("not found
+      // or no access") means the event user does not own it, not that it is gone.
+      if (role === 'admin' && status === 400) {
+        log('warn', 'asset_not_deletable', { asset: id.slice(0, 8) });
+        return res.status(403).json({ error: 'not_deletable' });
+      }
       // Gone already. Anything else (401/403: wrong or under-permissioned delete key) is a setup
       // problem the organiser must see in the logs, never a silent "deleted".
       if (status === 400 || status === 404) return res.status(404).json({ error: 'not_found' });
@@ -247,28 +363,18 @@ export function createGalleryRouter({
     // Unknown shapes fall through to the app's 404.
     if (!isUuid(id) || !MEDIA_KINDS.includes(kind)) return next();
 
-    const { deviceId } = req.gwSession;
     const slot = kind === 'original' || kind === 'video' ? 'heavy' : 'light';
-    const counts = mediaInFlight.get(deviceId) ?? { light: 0, heavy: 0 };
-    const full =
-      slot === 'light'
-        ? counts.light >= LIGHT_PER_DEVICE
-        : counts.heavy >= HEAVY_PER_DEVICE || heavyInFlight >= HEAVY_STREAMS_TOTAL;
-    if (full) {
+    const release = mediaSlots[slot].acquire(req.gwSession.deviceId, clientKey(req.ip));
+    if (!release) {
       res.set('Retry-After', '2');
       return res.status(429).json({ error: 'busy' });
     }
-    counts[slot] += 1;
-    mediaInFlight.set(deviceId, counts);
-    if (slot === 'heavy') heavyInFlight += 1;
 
-    // Stop the upstream transfer as soon as the guest goes away; release the slots once.
+    // Stop the upstream transfer as soon as the guest goes away; release the slot once.
     const controller = new AbortController();
     res.once('close', () => {
       controller.abort();
-      counts[slot] -= 1;
-      if (counts.light === 0 && counts.heavy === 0) mediaInFlight.delete(deviceId);
-      if (slot === 'heavy') heavyInFlight -= 1;
+      release();
     });
 
     let upstream;
@@ -375,10 +481,19 @@ export function createGalleryRouter({
       log('error', 'zip_plan_failed', { status: err.status ?? 0, error: err.message });
       return res.status(502).json({ error: 'unavailable' });
     }
-    for (const [id, plan] of zipPlans) if (plan.deviceId === deviceId) zipPlans.delete(id);
+    const address = clientKey(req.ip);
+    // One plan per device; per address, the oldest go so that this one fits under the cap.
+    const fromAddress = [];
+    for (const [id, plan] of zipPlans) {
+      if (plan.deviceId === deviceId) zipPlans.delete(id);
+      else if (plan.address === address) fromAddress.push(id);
+    }
+    const excess = fromAddress.length - (ZIP_PLANS_PER_ADDRESS - 1);
+    for (const old of fromAddress.slice(0, Math.max(0, excess))) zipPlans.delete(old);
     const id = crypto.randomBytes(16).toString('hex');
     zipPlans.set(id, {
       deviceId,
+      address,
       createdAt: now(),
       parts: info.archives.map((archive) => archive.assetIds),
     });
@@ -429,26 +544,20 @@ export function createGalleryRouter({
       res.set({ 'Content-Type': 'application/zip', 'Cache-Control': 'private, no-store' });
       return res.end();
     }
-    const { deviceId } = session;
-    if ((zipInFlight.get(deviceId) ?? 0) >= ZIP_PER_DEVICE || zipStreams >= ZIP_STREAMS_TOTAL) {
+    // Reserve the slot before any await and release it when the response ends, whichever way:
+    // parallel requests cannot all pass the check, and a guest leaving early frees it.
+    const release = zipSlots.acquire(session.deviceId, clientKey(req.ip));
+    if (!release) {
       return sendPage(
         res,
         429,
         'ダウンロードが混み合っています。今のダウンロードが終わってから、もう一度お試しください。',
       );
     }
-
-    // Reserve the slot before any await and release it when the response ends, whichever way:
-    // parallel requests cannot all pass the check, and a guest leaving early frees it.
-    zipInFlight.set(deviceId, (zipInFlight.get(deviceId) ?? 0) + 1);
-    zipStreams += 1;
     const controller = new AbortController();
     res.once('close', () => {
       controller.abort();
-      const left = (zipInFlight.get(deviceId) ?? 1) - 1;
-      if (left > 0) zipInFlight.set(deviceId, left);
-      else zipInFlight.delete(deviceId);
-      zipStreams -= 1;
+      release();
     });
 
     // Only what is in the album right now: one trashed id makes Immich reject the whole ZIP.

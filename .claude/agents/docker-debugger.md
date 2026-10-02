@@ -96,8 +96,8 @@ that gets committed (handoff reports included). Never print `.env` / `immich.env
 
 ## Standard diagnostic workflow
 
-1. `docker compose -p photosaver ps` / `docker compose -p wedding-gw ps`
-2. `docker compose -p <project> logs --tail 50 <service>`
+1. `docker compose -p photosaver ps` / `cd ~ && docker compose -p wedding-gw ps`
+2. `docker compose -p <project> logs --tail 50 <service>` (for `wedding-gw`, run it as `cd ~ && docker compose -p wedding-gw logs ...`)
 3. Mounts: `findmnt /mnt/photo`, `df -h /mnt/photo /srv`, marker files (above)
 4. Networking: `docker network inspect photosaver_gw`, `docker exec <c> wget -qO- http://<svc>:<port>/...`
 5. Healthcheck: `docker inspect --format='{{json .State.Health}}' <container>`

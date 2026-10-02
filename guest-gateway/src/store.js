@@ -12,6 +12,12 @@ import { DatabaseSync } from 'node:sqlite';
 // the trashed copy (verified on v3.2.4) and does not put it back in the album.
 // Deleting an asset does not change the status: `deleted_at` marks it instead, so ownership and
 // attribution come back on their own if the organiser restores it from the trash in Immich.
+// in_flight: an Immich attempt has started and not ended (still 1 after a crash mid-upload).
+// ambiguous: an earlier attempt may have reached Immich without us learning the result (network
+// error, timeout, abort, 5xx, crash): a later `duplicate` may then be our own asset (see importer).
+// reclaimed: `created` was inferred from such a `duplicate`, not reported by Immich. If another row
+// later gets a genuine `created` for the same asset, the guess was wrong and the row becomes a
+// `duplicate` again (markImported).
 export const STATUSES = ['pending', 'created', 'duplicate', 'failed', 'trashed'];
 const UPLOADER_CHUNK = 500;
 
@@ -28,6 +34,9 @@ CREATE TABLE IF NOT EXISTS uploads (
   asset_id      TEXT,
   attempts      INTEGER NOT NULL DEFAULT 0,
   deleted_at    INTEGER,
+  ambiguous     INTEGER NOT NULL DEFAULT 0,
+  in_flight     INTEGER NOT NULL DEFAULT 0,
+  reclaimed     INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -35,6 +44,13 @@ CREATE INDEX IF NOT EXISTS uploads_device ON uploads (device_id, created_at);
 CREATE INDEX IF NOT EXISTS uploads_status ON uploads (status);
 CREATE INDEX IF NOT EXISTS uploads_asset ON uploads (asset_id);
 `;
+// Columns added after the first schema, with their definitions (fixed strings, never input).
+const ADDED_COLUMNS = [
+  ['deleted_at', 'INTEGER'],
+  ['ambiguous', 'INTEGER NOT NULL DEFAULT 0'],
+  ['in_flight', 'INTEGER NOT NULL DEFAULT 0'],
+  ['reclaimed', 'INTEGER NOT NULL DEFAULT 0'],
+];
 
 /**
  * @param {string} dbPath file path, or ':memory:' in tests
@@ -47,13 +63,13 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
   if (!readOnly) {
     db.exec('PRAGMA journal_mode = WAL;');
     db.exec(SCHEMA);
-    // Databases created before deleted_at existed (development/test runs).
+    // Databases created before these columns existed (CREATE TABLE IF NOT EXISTS keeps them).
     const columns = db
       .prepare('PRAGMA table_info(uploads)')
       .all()
       .map((c) => c.name);
-    if (!columns.includes('deleted_at')) {
-      db.exec('ALTER TABLE uploads ADD COLUMN deleted_at INTEGER');
+    for (const [name, definition] of ADDED_COLUMNS) {
+      if (!columns.includes(name)) db.exec(`ALTER TABLE uploads ADD COLUMN ${name} ${definition}`);
     }
   }
 
@@ -63,10 +79,18 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const getOne = db.prepare('SELECT * FROM uploads WHERE upload_id = ?');
   const setDone = db.prepare(
-    'UPDATE uploads SET status = ?, asset_id = ?, updated_at = ? WHERE upload_id = ?',
+    'UPDATE uploads SET status = ?, asset_id = ?, reclaimed = ?, in_flight = 0, updated_at = ? WHERE upload_id = ?',
   );
+  // Rows that only guessed they created this asset (reclaimed) lose it to the real creator.
+  const revertReclaimed = db.prepare(`
+    UPDATE uploads SET status = 'duplicate', reclaimed = 0, updated_at = ?
+    WHERE asset_id = ? AND status = 'created' AND reclaimed = 1 AND upload_id != ?
+    RETURNING upload_id`);
   const setFailed = db.prepare(
-    "UPDATE uploads SET status = 'failed', updated_at = ? WHERE upload_id = ?",
+    "UPDATE uploads SET status = 'failed', in_flight = 0, updated_at = ? WHERE upload_id = ?",
+  );
+  const setAttemptEnded = db.prepare(
+    'UPDATE uploads SET in_flight = 0, ambiguous = MAX(ambiguous, ?), updated_at = ? WHERE upload_id = ?',
   );
   // Only a failed row: never resets one the importer already finished.
   const setRequeued = db.prepare(
@@ -75,9 +99,11 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
   const failedRows = db.prepare(
     "SELECT upload_id, size, attempts, updated_at FROM uploads WHERE status = 'failed' ORDER BY updated_at, rowid",
   );
-  const bumpAttempts = db.prepare(
-    'UPDATE uploads SET attempts = attempts + 1, updated_at = ? WHERE upload_id = ? RETURNING attempts',
-  );
+  // An attempt still open from before (crash mid-upload) turns into ambiguity first.
+  const bumpAttempts = db.prepare(`
+    UPDATE uploads SET attempts = attempts + 1, ambiguous = MAX(ambiguous, in_flight),
+      in_flight = 1, updated_at = ?
+    WHERE upload_id = ? RETURNING attempts`);
   const byDeviceAndIds = (count) =>
     db.prepare(`
       SELECT upload_id, filename, status FROM uploads
@@ -95,6 +121,9 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
   const uploaderFullChunk = db.prepare(uploaderSql(UPLOADER_CHUNK));
   const uploaderOf = (count) =>
     count === UPLOADER_CHUNK ? uploaderFullChunk : db.prepare(uploaderSql(count));
+  const anyCreated = db.prepare(
+    "SELECT 1 FROM uploads WHERE asset_id = ? AND status = 'created' LIMIT 1",
+  );
   const ownCreated = db.prepare(
     "SELECT 1 FROM uploads WHERE asset_id = ? AND device_id = ? AND status = 'created' LIMIT 1",
   );
@@ -144,9 +173,30 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
       return getOne.get(uploadId);
     },
 
-    /** @param {'created'|'duplicate'|'trashed'} status */
-    markImported(uploadId, status, assetId) {
-      setDone.run(status, assetId, now(), uploadId);
+    /**
+     * Record the import result. reclaimed: `created` inferred from a `duplicate` after an
+     * ambiguous attempt. A genuine `created` (Immich said so) turns every reclaimed row for the
+     * same asset back into `duplicate`, in the same transaction.
+     * @param {'created'|'duplicate'|'trashed'} status
+     * @param {{ reclaimed?: boolean }} [options]
+     * @returns {string[]} upload ids whose reclaimed `created` was reverted
+     */
+    markImported(uploadId, status, assetId, { reclaimed = false } = {}) {
+      const t = now();
+      const isReclaimed = status === 'created' && reclaimed;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        setDone.run(status, assetId, isReclaimed ? 1 : 0, t, uploadId);
+        const reverted =
+          status === 'created' && !isReclaimed
+            ? revertReclaimed.all(t, assetId, uploadId).map((r) => r.upload_id)
+            : [];
+        db.exec('COMMIT');
+        return reverted;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     },
 
     markFailed(uploadId) {
@@ -171,9 +221,31 @@ export function openStore(dbPath, { now = Date.now, readOnly = false } = {}) {
       }));
     },
 
-    /** Count one Immich attempt; returns the new total. */
+    /** Count one Immich attempt and mark it in flight; returns the new total. */
     addAttempt(uploadId) {
       return bumpAttempts.get(now(), uploadId)?.attempts ?? 0;
+    },
+
+    /**
+     * The attempt ended without a result. ambiguous: Immich may have stored the file anyway
+     * (sticky: stays set for the row's later attempts).
+     */
+    endAttempt(uploadId, { ambiguous }) {
+      setAttemptEnded.run(ambiguous ? 1 : 0, now(), uploadId);
+    },
+
+    /**
+     * True when an earlier attempt of this row may have reached Immich unseen: one ended
+     * ambiguously, or one was still in flight when the gateway stopped.
+     */
+    hadAmbiguousAttempt(uploadId) {
+      const row = getOne.get(uploadId);
+      return Boolean(row && (row.ambiguous || row.in_flight));
+    },
+
+    /** True when some upload through the gateway created this asset. */
+    isCreatedByAnyone(assetId) {
+      return anyCreated.get(assetId) !== undefined;
     },
 
     /** The caller's own uploads, newest first (never other devices' rows). */
