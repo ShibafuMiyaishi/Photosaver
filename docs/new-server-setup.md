@@ -169,7 +169,8 @@ systemctl show docker -p After | tr ' ' '\n' | grep -x mnt-photo.mount   # 1 行
 
 - `After=` は**順序だけ**の指定。起動時に `mnt-photo.mount` のマウント処理が走っていれば、それが
   **成功か失敗で終わるまで** Docker の起動を待たせる。HDD が認識されない場合はデバイス待ちの
-  タイムアウト(既定で 90 秒程度)の後にマウントが失敗し、Docker はそのまま起動する
+  タイムアウト(既定で 90 秒程度)の後にマウントが失敗し、Docker はそのまま起動する。
+  そのため HDD が外れていると Docker(Immich)の起動がその分だけ遅れるが、異常ではない
   (終了時は逆順になり、Docker が止まってからアンマウントされる)
 - `Requires=` / `RequiresMountsFor=` は**使わない**。これらはマウント失敗時に Docker 自体を起動させない
   (`RequiresMountsFor=` は `Requires=` + `After=` と同じ)。HDD が壊れても OS・Docker・SSH は動いて

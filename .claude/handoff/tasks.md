@@ -131,7 +131,8 @@ Report: `reports/YYYY-MM-DD-T2b.md` (pass/fail, no hostnames/IPs). Commit + push
 
 ## T2c — 再起動時の起動順と DB ダンプ同期の安全化
 
-Status: READY (after T1; independent of T2/T3). Needs user approval: step 4 uses `sudo`.
+Status: READY (after T1; independent of T2/T3, but assumes `/srv/photosaver/scripts/` and the
+03:00 cron entry from `docs/new-server-setup.md` step 8 exist — step 3 checks this). Needs user approval: step 4 uses `sudo`.
 No container is restarted; Immich stays up throughout.
 
 Background (issues #34, #35): on boot the Docker daemon restarts `restart: always` containers itself,
