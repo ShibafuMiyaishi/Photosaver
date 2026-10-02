@@ -17,7 +17,7 @@
   諦めたファイルも消さずに `failed/` に残し、`scripts/requeue-failed.js` で取り込み直せる)
 - 「みんなの写真」: 一覧・拡大・動画再生・1 件ずつ保存・**まとめて保存**
   (iPhone / iPad → 共有メニューで写真アプリへ、Android → 端末にダウンロード、PC → ZIP)
-- 削除: 自分の端末から上げた写真だけ。管理者の合言葉なら全件(Immich のゴミ箱へ移るだけで復元できる)
+- 削除: 自分の端末から上げた写真だけ。管理者の合言葉なら、窓口から上がった写真を誰の投稿でも(Immich のゴミ箱へ移るだけで復元できる)
 - `immich.env` が無いときは**速度検証モード**(受信して計測し、削除するだけ)
 
 ## 構成
@@ -27,13 +27,13 @@
 | `src/index.js` | 起動・定期処理(期限切れアップロードの掃除、受付終了時のステージング削除、取り込みの再開) |
 | `src/config.js` | 環境変数の読み込みと検証(`IMMICH_SHARE_KEY` が空なら速度検証モード) |
 | `src/app.js` | ルート定義(ここに無いものは 404)、セキュリティヘッダー、CSRF 対策、ログイン、期限後の 410 |
-| `src/auth.js` / `src/lockout.js` | 合言葉の scrypt 照合と署名付きセッション Cookie / 総当たり対策(接続元ごとのロック、信頼済みでない接続元の全体停止、同時照合 4 件まで。`LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` で調整) |
-| `src/uploads.js` | tus 受信(送信を始めた端末に紐付け、拡張子・サイズ・空き容量・中身の検査と拡張子の補正、計測ログ)→ 取り込み待ちへ。起動時に完了処理前に止まった受信を拾い直す |
+| `src/auth.js` / `src/lockout.js` | 合言葉の scrypt 照合(ハッシュの形式検査を含む)と署名付きセッション Cookie / 総当たり対策(接続元ごとのロック、信頼済みでない接続元の全体停止、全接続元の失敗が多い間の管理者照合の停止、同時照合は同じ接続元で 1 件・信頼済みの接続元で 3 件・全体で 4 件まで。`LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` で調整。接続元は IPv4 はアドレス、IPv6 は /64 単位) |
+| `src/uploads.js` | tus 受信(送信を始めた端末に紐付け、拡張子・サイズ・空き容量・中身の検査と拡張子の補正、計測ログ)→ 取り込み待ちへ。起動時に完了処理前に止まった受信を拾い直す。クエリ文字列付きの tus リクエストは 400 |
 | `src/importer.js` / `src/store.js` | 取り込みキュー(Immich へ送信・再試行。諦めたファイルはステージングの `failed/` へ移して残す) / 受信と取り込み結果の記録(`node:sqlite`) |
 | `src/gallery.js` | 一覧(全件集約・重複除去)、画像・動画・原寸の中継(端末・接続元・全体の同時数上限)、削除、ZIP の分割計画と中継 |
 | `src/immich.js` | Immich v3 の呼び出し(共有リンクキー: アップロード・一覧・メディア・ZIP / 削除専用キー: 削除) |
 | `src/log.js` | 1 行 1 JSON のログ(秘密情報は出さない) |
-| `public/` | ゲスト用画面(ビルド工程なし)。`gallery.js` は「みんなの写真」(PhotoSwipe)、`bulk.js` は端末別の保存、`upload-retry.js` は送信失敗の分類と自動再試行の間隔 |
+| `public/` | ゲスト用画面(ビルド工程なし)。`gallery.js` は「みんなの写真」(PhotoSwipe)、`bulk.js` は端末別の保存、`upload-retry.js` は送信失敗の分類と自動再試行の間隔、`login-retry.js` はログインが「混み合っています」(429 busy)のときの自動再試行の間隔(最大 45 秒・20 回) |
 | `scripts/setup-event.js` | イベント用の Immich 準備(専用ユーザー・アルバム・共有リンク・削除専用キー)を自動化 |
 | `scripts/event-status.js` | 当日の状況確認(件数・容量・期限までの残り・HDD の空き。読み取り専用) |
 | `scripts/requeue-failed.js` | 取り込みに失敗したファイルの確認と、`--apply` で `failed/` から取り込み待ちに戻す(件数と ID だけ表示) |
@@ -136,11 +136,12 @@ fi
 [ -f /srv/photosaver/guest-gateway/.env ] || \
   install -m 600 /srv/photosaver/repo/guest-gateway/.env.example /srv/photosaver/guest-gateway/.env
 #    TS_AUTHKEY / SESSION_SECRET / GUEST_PASSWORD_HASH / CLOSES_AT を埋める
-#    (任意)ADMIN_PASSWORD_HASH = 幹事用の合言葉(ゲストとは別)。この合言葉で入るとどの写真も削除できる
+#    (任意)ADMIN_PASSWORD_HASH = 幹事用の合言葉(ゲストとは別。長くランダムに、例: 12 文字以上)。
+#    この合言葉で入ると、窓口から上がった写真を誰の投稿でも削除できる
 #    CLOSES_AT は余裕を持たせる(後から延ばすと全員の再ログインが必要。docs/guest-gateway.md「困ったとき」)
 #    (任意)LOGIN_MAX_FAILURES / LOGIN_LOCK_MINUTES = ログイン試行制限(既定 20 回 / 2 分。速度検証の結果で調整)
 #    ハッシュは scrypt N=2^17(1 回 0.2〜0.5 秒・約 128 MiB)。以前の N=2^14 のハッシュも使えるが作り直し推奨。
-#    使えないハッシュ(形式違い・N が 2^14〜2^20 の範囲外など)では窓口は起動しない
+#    使えないハッシュ(形式違い・途中で切れている・N が 2^14〜2^20 の範囲外など)では窓口は起動しない
 openssl rand -hex 32                                         # → SESSION_SECRET
 docker build -t guest-gateway /srv/photosaver/repo/guest-gateway
 read -rs P && printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js; unset P
@@ -161,7 +162,9 @@ cd ~ && docker compose -p wedding-gw logs -f guest-gateway     # 計測ログ(up
 
 - `upload_finished` ログの `size` / `elapsedMs` / `mbps` / `detectedType`(iPhone の HEIC/JPEG・動画形式の確認)
 - 画面の「計測情報」: サーバーから見える接続元 IP と、Funnel 経由かどうか(別々の回線のスマホが別のアドレスに
-  なること。ログインのロックと画像・ZIP の同時数上限は接続元ごと。IPv6 は /64 単位で同じ接続元とみなす)
+  なること。ログインのロック・合言葉の同時照合数(同じ接続元で 1 件、信頼済みの接続元で 3 件、全体で 4 件)と
+  画像・ZIP の同時数上限は接続元ごと。IPv6 は /64 単位で同じ接続元とみなす)。同じ Wi-Fi から大勢が一斉にログインすると
+  「混み合っています」が出ることがあるが、画面が自動で再試行する
 - iPhone の形式確認でファイル自体を残したい場合だけ、`.env` を `KEEP_UPLOADS=true` にして窓口を作り直す
   (`.env` の変更は再起動では反映されない):
   ```bash

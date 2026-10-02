@@ -198,13 +198,17 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
    and skips an existing file). Fill in the remaining values in place: SESSION_SECRET
    (`openssl rand -hex 32`), GUEST_PASSWORD_HASH (via `docker run ... node scripts/hash-password.js`,
    the user types the password; never echo it), CLOSES_AT (ask the user; e.g. a few days after the
-   test). Build the image from the pulled code first (README step 3 does) so the hash gets the new
+   test). Build the image from the pulled code first (the README 「デプロイ」 code block, comment `# 3.`,
+   runs `docker build` before `hash-password.js`) so the hash gets the new
    scrypt parameters (N=2^17; it must start with `scrypt:131072:`). If `.env` already holds a hash
    made earlier (`scrypt:16384:`), it still works, but regenerate it now (recommended). Time one run
    on the mini PC and put the duration in the report (docker startup included; expected ~0.3–0.5 s for
    the hash itself): `read -rs P && time (printf '%s' "$P" | docker run --rm -i guest-gateway node scripts/hash-password.js); unset P`.
-   The gateway refuses to start on a malformed hash or one outside N 2^14..2^20. Keep the template defaults for GW_DATA_DIR / STAGING_DIR_HOST / MOUNT_MARKER_HOST unless
-   T1 showed different paths. Verify required keys without printing values:
+   The gateway refuses to start on a malformed hash (bad base64url, salt < 16 bytes, hash outside
+   32–64 bytes — e.g. a truncated paste) or one outside N 2^14..2^20.
+   Keep the template defaults for GW_DATA_DIR / STAGING_DIR_HOST / MOUNT_MARKER_HOST unless
+   T1 showed different paths. `MIN_FREE_GB` now defaults to 50 (a template `.env` copied before this
+   change may still say 10 — set it to 50 unless the user decides otherwise). Verify required keys without printing values:
    `grep -cE '^(TS_AUTHKEY|GW_DATA_DIR|STAGING_DIR_HOST|SESSION_SECRET|GUEST_PASSWORD_HASH|CLOSES_AT)=.+' .env` → 6,
    `grep -c 'CHANGE_ME' .env` → 0 (the template ships placeholder/default values, so the first
    check alone does not prove T3 filled anything in), and show `grep '^CLOSES_AT=' .env` to the
@@ -235,7 +239,9 @@ task — without it the gateway runs in speed-test mode (receive, measure, delet
      client's address, which `trust proxy = 1` reads). If every phone shows the same address, report
      it as a blocker: the per-IP login lockout, the login trust (24 h after a successful login), the
      per-address media/ZIP limits and ZIP plan caps would then be shared by all guests (IPv6 addresses
-     in one /64 count as one address by design). Phones on one
+     in one /64 count as one address by design). `TRUST_PROXY_HOPS` is NOT passed by `compose.yml`, so
+     it is always the default 1 in production; fixing a wrong address needs a `compose.yml` change
+     (Mac/dev flow), not an `.env` edit. Phones on one
      Wi-Fi showing one address is expected; the lockout defaults allow 20 failures / 15 min per
      address (2-min first lock) and can be tuned with `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES`
      in `.env` — recommend values in the report.
@@ -268,14 +274,18 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    admin password (`read -rs`), run `scripts/setup-event.js` on `--network photosaver_gw` with
    `--out /out/immich.env`. Verify only `ls -l /srv/photosaver/guest-gateway/immich.env` (mode 600)
    and `grep -c '^IMMICH_' /srv/photosaver/guest-gateway/immich.env` → 3. Never print the file.
-3. Organiser password (optional but recommended): the user types a password different from the
-   guest one; generate its hash like GUEST_PASSWORD_HASH (`docker run ... node scripts/hash-password.js`)
-   and put it in `.env` as `ADMIN_PASSWORD_HASH=` (never echo it). Logging in with it enables deleting
-   any photo.
+3. Password hashes, all BEFORE the recreate in step 4 (never print `.env` or a hash):
+   - Organiser password (optional but recommended): the user types a password different from the
+     guest one, long and random (e.g. 12+ characters — a guest-password holder can try to guess it);
+     generate its hash like GUEST_PASSWORD_HASH (`docker run ... node scripts/hash-password.js`) and
+     put it in `.env` as `ADMIN_PASSWORD_HASH=`. Logging in with it enables deleting any photo that
+     came through the gateway.
+   - Old-format check: `grep -cE '^(GUEST|ADMIN)_PASSWORD_HASH=scrypt:16384:' /srv/photosaver/guest-gateway/.env`
+     → if > 0, regenerate those hashes now (the user types the password again; recommended).
+   - Afterwards: `grep -cE '^(GUEST|ADMIN)_PASSWORD_HASH=scrypt:131072:' /srv/photosaver/guest-gateway/.env`
+     → 1 (guest only) or 2 (guest + organiser).
 4. Follow **「取り込みモードに切り替える」 → 「2. 窓口を作り直して確認」**: recreate `guest-gateway`, check the log shows `immich_ok`
    with version >= 3.2.4.
-   If `ADMIN_PASSWORD_HASH` / `GUEST_PASSWORD_HASH` still start with `scrypt:16384:`, regenerate them
-   now (new parameters, recommended) and recreate again — never print them.
 5. From a phone on mobile data: log in with a nickname, upload 1 photo and 1 short video →
    the screen shows 「アルバムに追加しました」, the items appear in the album in the Immich app,
    and `cd ~ && docker compose -p wedding-gw logs guest-gateway | grep import_` shows `import_done`.
@@ -295,7 +305,8 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
    **Bulk save** (「まとめて保存」; needs ~40 items incl. 2–3 videos in the album, one ≥ 600 MB if possible):
    - iPhone (Safari): 「準備する」 → 「写真アプリに保存」 → share sheet shows 「〇項目を保存」 (photo-only:
      「〇枚の画像を保存」) → items appear in Photos (videos too); the second batch follows; a video
-     > 200 MB is listed below with a 「保存」 button → Files app → share → 「ビデオを保存」.
+     > 200 MB (`SHARE_BULK_MAX_FILE_BYTES`, the per-file cap for bulk batches) is listed below with a
+     「保存」 button → Files app → share → 「ビデオを保存」.
      Note whether Safari reloads/crashes while preparing (memory) and the exact sheet labels.
    - 「やめる」 mid-run, reload, 「準備する」 again → continues with the rest; the 自分が送ったものは除く
      toggle changes the count; 「保存済みの記録を消す」 resets it.
@@ -304,18 +315,29 @@ shared-link expiry (`--expires`, later than `CLOSES_AT`, e.g. +1 day). Never com
      Google Photos 「Download」 folder. Also what happens if the multi-download prompt is dismissed.
      With a ≥ 600 MB video: it is listed for one-by-one saving.
    - Android via the LINE link: the panel says to open in Chrome.
+   **Login rush on one Wi-Fi**: 5+ phones on the same Wi-Fi (new browser sessions, e.g. private tabs)
+   tap ログイン at the same moment → all get in (some may briefly show 「混み合っています。自動でもう一度
+   試しています…(n 回目)」; that is expected — 1 check per address at a time, 3 once the address is
+   trusted, 4 in total). Report how many retries were shown and whether anyone was left out.
+   **Organiser login**: logging in with the organiser password greets with 「(管理者モード: このページから
+   上がった写真を削除できます)」.
    - PC: 「ZIP を作成」 → download → the ZIP opens and holds the album. If the album is > 2 GB, open a
      third part while two download → 「混み合っています」 page. Time a 2 GB part over the venue-like
      network (download speed over Funnel was not part of T3).
    - Memory constants: from the iPhone (Safari reload/crash while preparing?) and Android (tab killed,
      downloads missing?) results, recommend values for `public/bulk.js` — iOS `SHARE_BATCH_BYTES`
-     300 MB / `SHARE_MAX_FILE_BYTES` 500 MB, Android `LIVE_BLOB_BUDGET_BYTES` 600 MB. Report only;
+     300 MB / `SHARE_BULK_MAX_FILE_BYTES` 200 MB / `SHARE_MAX_FILE_BYTES` 500 MB, Android
+     `LIVE_BLOB_BUDGET_BYTES` 600 MB. Report only;
      code changes go through the Mac/dev flow.
 6. Event-day login trust (tell the user; record in the report that it was explained): the login trust
    for the venue address lives in memory only. On the event day the organiser (or the user) logs in
    once **from the venue Wi-Fi** before guests arrive, and again after any gateway restart/recreate,
    so a global login pause triggered from elsewhere cannot lock the venue out
-   (docs/guest-gateway.md 「ログインの総当たり対策」).
+   (docs/guest-gateway.md 「ログインの総当たり対策」). There is no logout: on a phone that is already
+   logged in, use a private/incognito tab. Any guest's successful login from the venue Wi-Fi also
+   makes the address trusted. Also explain: the organiser password should be long/random, and while
+   ≥ 300 failed logins fall within 15 min the organiser password is refused like a wrong one
+   (`admin_check_paused`) — wait for `admin_check_resumed`.
 7. Leave it running or stop it as the user prefers (kill switch: `cd ~ && docker compose -p wedding-gw down`).
 
 Report: `reports/YYYY-MM-DD-T4.md` (steps pass/fail; no album names, e-mails, URLs, keys). Commit + push.
