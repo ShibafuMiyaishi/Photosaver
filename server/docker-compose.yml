@@ -12,6 +12,13 @@
 #      Immich だけに届くようにする。Redis・Postgres はこのネットワークに入れない。
 #      docs/guest-gateway.md 参照)
 #
+# 上記以外の小さな違い(番号付きの差分ではない。公式との diff で毎回出るので注記しておく):
+#   - name: photosaver(公式は immich。プロジェクト名・ネットワーク名 photosaver_* の元。変えない)
+#   - IMMICH_VERSION の既定値が v3(公式は release。方針としてメジャー固定)
+#   - depends_on を長い書式で記述(mount-guard の condition を付けるため)
+#   - Valkey イメージの digest と redis の healthcheck が公式より古いことがある。
+#     月次アップデートのときに公式に合わせる(合わせると Redis コンテナが作り直される)
+#
 # 起動前に必ず: cp .env.example .env して値を埋める。
 # セットアップ全体: docs/new-server-setup.md / 移行: docs/migration-runbook.md
 
