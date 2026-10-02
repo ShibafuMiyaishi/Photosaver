@@ -217,19 +217,52 @@ describe('createLockout', () => {
     expect(lockout.check('203.0.113.7').allowed).toBe(true);
   });
 
-  it('caps trusted keys by dropping the oldest success first', () => {
-    const { clock, lockout } = setup({ maxKeys: 2 });
+  it('caps trusted keys by dropping the fewest successes, then the oldest success', () => {
+    const { clock, lockout } = setup({ maxKeys: 3 });
     lockout.recordSuccess('192.0.2.1');
     clock.advance(1_000);
     lockout.recordSuccess('192.0.2.2');
     clock.advance(1_000);
-    lockout.recordSuccess('192.0.2.1'); // refreshed: now the newest
-    lockout.recordSuccess('192.0.2.3'); // evicts 192.0.2.2
-    expect(lockout.trustedSize()).toBe(2);
+    lockout.recordSuccess('192.0.2.3');
+    clock.advance(1_000);
+    lockout.recordSuccess('192.0.2.1'); // 2 successes, now also the newest
+    lockout.recordSuccess('192.0.2.4'); // evicts 192.0.2.2 (1 success, the oldest of those)
+    lockout.recordSuccess('192.0.2.5'); // evicts 192.0.2.3
+    expect(lockout.trustedSize()).toBe(3);
     tripGlobalPause(lockout);
-    expect(lockout.check('192.0.2.1').allowed).toBe(true);
-    expect(lockout.check('192.0.2.3').allowed).toBe(true);
+    for (const ip of ['192.0.2.1', '192.0.2.4', '192.0.2.5']) {
+      expect(lockout.check(ip).allowed).toBe(true);
+    }
     expect(lockout.check('192.0.2.2').allowed).toBe(false);
+    expect(lockout.check('192.0.2.3').allowed).toBe(false);
+  });
+
+  it('keeps a venue key with many logins through a flood of one-off trusted keys', () => {
+    const { clock, lockout } = setup({ maxKeys: 10 });
+    // The venue: the organiser and a few guests log in early, then nothing for a while.
+    for (let i = 0; i < 5; i += 1) lockout.recordSuccess('203.0.113.7');
+    clock.advance(HOUR);
+    // 100 addresses that each log in once (e.g. one guest-password holder rotating IPv6s).
+    for (let i = 0; i < 100; i += 1) {
+      lockout.recordSuccess(`2001:db8:${i.toString(16)}::1`);
+      clock.advance(1_000);
+    }
+    expect(lockout.trustedSize()).toBe(10);
+    tripGlobalPause(lockout);
+    expect(lockout.check('203.0.113.7').allowed).toBe(true);
+  });
+
+  it('restarts the success count once trust has expired', () => {
+    const { clock, lockout } = setup({ maxKeys: 2 });
+    for (let i = 0; i < 5; i += 1) lockout.recordSuccess('203.0.113.7');
+    clock.advance(24 * HOUR);
+    lockout.recordSuccess('203.0.113.7'); // trust had lapsed: counts as 1 again
+    clock.advance(1_000);
+    lockout.recordSuccess('192.0.2.1');
+    lockout.recordSuccess('192.0.2.2'); // tie at 1: the oldest success (the venue) goes
+    tripGlobalPause(lockout);
+    expect(lockout.check('203.0.113.7').allowed).toBe(false);
+    expect(lockout.check('192.0.2.1').allowed).toBe(true);
   });
 
   it('keeps memory bounded by dropping the oldest addresses', () => {
@@ -250,8 +283,106 @@ describe('createLockout', () => {
   });
 });
 
+describe('admin guess window', () => {
+  const ATTACKER = '203.0.113.66';
+
+  /**
+   * A guest-password holder: log in (trusted, per-key failures cleared), 19 wrong guesses
+   * (each checked against the admin hash while allowed), repeat. Returns the admin checks made.
+   */
+  function guestHolderGuesses(lockout, clock, rounds) {
+    let adminChecks = 0;
+    for (let round = 0; round < rounds; round += 1) {
+      lockout.recordSuccess(ATTACKER);
+      for (let i = 0; i < 19; i += 1) {
+        const attempt = lockout.beginAttempt(ATTACKER);
+        expect(attempt.ok).toBe(true);
+        if (lockout.adminCheckAllowed()) adminChecks += 1;
+        lockout.recordFailure(ATTACKER);
+        attempt.release();
+        clock.advance(100);
+      }
+    }
+    return adminChecks;
+  }
+
+  it('pauses admin checks once 300 logins failed in 15 minutes, trusted keys included', () => {
+    const { clock, lockout } = setup();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    // 20 rounds = 380 wrong guesses, never locked (success clears the per-key count) and never
+    // feeding the untrusted global pause...
+    const adminChecks = guestHolderGuesses(lockout, clock, 20);
+    expect(lockout.check(ATTACKER).allowed).toBe(true);
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('login_global_pause'));
+    // ...but only the first 300 were checked against the admin hash.
+    expect(adminChecks).toBe(300);
+    expect(lockout.adminCheckAllowed()).toBe(false);
+    const paused = console.warn.mock.calls.filter(([line]) => line.includes('admin_check_paused'));
+    expect(paused).toHaveLength(1);
+    // Guest logins are unaffected: the key is neither locked nor paused.
+    const attempt = lockout.beginAttempt(ATTACKER);
+    expect(attempt.ok).toBe(true);
+    attempt.release();
+  });
+
+  it('counts failures from every key and resumes once the window drops below the limit', () => {
+    const { clock, lockout } = setup();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    lockout.recordSuccess('203.0.113.7');
+    for (let i = 0; i < 150; i += 1) lockout.recordFailure('203.0.113.7'); // trusted
+    clock.advance(MIN);
+    for (let i = 0; i < 149; i += 1) lockout.recordFailure(`198.51.${i >> 8}.${i & 255}`);
+    expect(lockout.adminCheckAllowed()).toBe(true);
+    lockout.recordFailure('198.51.100.250');
+    expect(lockout.adminCheckAllowed()).toBe(false);
+    // The 150 trusted failures leave the window 15 minutes after they happened.
+    clock.advance(14 * MIN - 1);
+    expect(lockout.adminCheckAllowed()).toBe(false);
+    clock.advance(1);
+    expect(lockout.adminCheckAllowed()).toBe(true);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('admin_check_resumed'));
+    // Stays open while the window is below the limit; logs each change once.
+    expect(lockout.adminCheckAllowed()).toBe(true);
+    const resumed = console.log.mock.calls.filter(([line]) => line.includes('admin_check_resumed'));
+    expect(resumed).toHaveLength(1);
+  });
+
+  it('keeps the admin pause independent of successful logins', () => {
+    const { lockout } = setup({ adminGuessLimit: 3 });
+    fail(lockout, '192.0.2.1', 3);
+    expect(lockout.adminCheckAllowed()).toBe(false);
+    lockout.recordSuccess('192.0.2.1');
+    lockout.recordSuccess('192.0.2.2');
+    expect(lockout.adminCheckAllowed()).toBe(false);
+  });
+});
+
 describe('beginAttempt', () => {
-  it('allows one attempt in flight per client key', () => {
+  it('allows up to 3 attempts in flight for a trusted key, within the global cap', () => {
+    const { lockout } = setup();
+    lockout.recordSuccess('203.0.113.7');
+    const held = [1, 2, 3].map(() => lockout.beginAttempt('203.0.113.7'));
+    expect(held.every((a) => a.ok)).toBe(true);
+    expect(lockout.beginAttempt('::ffff:203.0.113.7')).toEqual({
+      ok: false,
+      reason: 'busy',
+      retryAfterSec: 1,
+    });
+    // The fourth global slot is still there for another address, then the cap applies.
+    const other = lockout.beginAttempt('198.51.100.1');
+    expect(other.ok).toBe(true);
+    expect(lockout.beginAttempt('198.51.100.2').reason).toBe('busy');
+    held[0].release();
+    held[0].release(); // idempotent: frees one slot only
+    expect(lockout.inFlight()).toBe(3);
+    const again = lockout.beginAttempt('203.0.113.7');
+    expect(again.ok).toBe(true);
+    expect(lockout.beginAttempt('203.0.113.7').reason).toBe('busy');
+    for (const a of [held[1], held[2], other, again]) a.release();
+    expect(lockout.inFlight()).toBe(0);
+  });
+
+  it('allows one attempt in flight per untrusted client key', () => {
     const { lockout } = setup();
     const first = lockout.beginAttempt('203.0.113.7');
     expect(first.ok).toBe(true);

@@ -2,9 +2,12 @@
 
 import { loadConfig } from '../src/config.js';
 
+// A well-formed `salt:hash` tail (16-byte salt, 32-byte key) for hand-written test hashes.
+const SALT_HASH = `${Buffer.alloc(16, 's').toString('base64url')}:${Buffer.alloc(32, 'h').toString('base64url')}`;
+
 const VALID = {
   SESSION_SECRET: 'a'.repeat(64),
-  GUEST_PASSWORD_HASH: 'scrypt:16384:8:1:c2FsdA:aGFzaA',
+  GUEST_PASSWORD_HASH: `scrypt:16384:8:1:${SALT_HASH}`,
   CLOSES_AT: '2026-10-31T23:59:00+09:00',
   STAGING_DIR: '/data/staging',
 };
@@ -86,12 +89,12 @@ describe('loadConfig', () => {
   });
 
   it.each([
-    ['GUEST_PASSWORD_HASH', 'N above 2^20', 'scrypt:2097152:8:1:c2FsdA:aGFzaA'],
-    ['GUEST_PASSWORD_HASH', 'N not a power of 2', 'scrypt:100000:8:1:c2FsdA:aGFzaA'],
-    ['GUEST_PASSWORD_HASH', 'r above 32', 'scrypt:16384:33:1:c2FsdA:aGFzaA'],
-    ['GUEST_PASSWORD_HASH', 'p above 16', 'scrypt:16384:8:17:c2FsdA:aGFzaA'],
+    ['GUEST_PASSWORD_HASH', 'N above 2^20', `scrypt:2097152:8:1:${SALT_HASH}`],
+    ['GUEST_PASSWORD_HASH', 'N not a power of 2', `scrypt:100000:8:1:${SALT_HASH}`],
+    ['GUEST_PASSWORD_HASH', 'r above 32', `scrypt:16384:33:1:${SALT_HASH}`],
+    ['GUEST_PASSWORD_HASH', 'p above 16', `scrypt:16384:8:17:${SALT_HASH}`],
     ['GUEST_PASSWORD_HASH', 'missing parts', 'scrypt:16384:8:1'],
-    ['ADMIN_PASSWORD_HASH', 'N above 2^20', 'scrypt:2097152:8:1:c2FsdA:aGFzaA'],
+    ['ADMIN_PASSWORD_HASH', 'N above 2^20', `scrypt:2097152:8:1:${SALT_HASH}`],
   ])('rejects %s with %s', (name, _label, value) => {
     expect(() => loadConfig({ ...VALID, [name]: value })).toThrow(
       new RegExp(`^${name} is not a usable scrypt hash`),
@@ -99,7 +102,7 @@ describe('loadConfig', () => {
   });
 
   it('accepts hashes with the old N=2^14 and the current N=2^17', () => {
-    const current = 'scrypt:131072:8:1:c2FsdA:aGFzaA';
+    const current = `scrypt:131072:8:1:${SALT_HASH}`;
     const config = loadConfig({ ...VALID, ADMIN_PASSWORD_HASH: current });
     expect(config.guestPasswordHash).toBe(VALID.GUEST_PASSWORD_HASH);
     expect(config.adminPasswordHash).toBe(current);

@@ -10,7 +10,8 @@ import express from 'express';
 import * as tus from 'tus-js-client';
 import { vi } from 'vitest';
 import { handleError } from '../src/app.js';
-import { login, PASSWORD, startServer, TMP_ROOT } from './helpers/server.js';
+import { hashPassword } from '../src/auth.js';
+import { FAST_SCRYPT, login, PASSWORD, startServer, TMP_ROOT } from './helpers/server.js';
 
 // 1x1 transparent PNG.
 const PNG = Buffer.from(
@@ -272,6 +273,80 @@ describe('login lockout tuning', () => {
     expect((await login(srv.baseUrl, PASSWORD, '')).res.status).toBe(429);
     // The limit is per address, so it blocks valid logins from there too.
     expect((await login(srv.baseUrl)).res.status).toBe(429);
+  });
+});
+
+describe('admin password under guessing', () => {
+  const ADMIN_PASSWORD = 'organiser only 42';
+  let srv;
+  let t;
+  beforeEach(async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    t = Date.now();
+    srv = await startServer(
+      { adminPasswordHash: await hashPassword(ADMIN_PASSWORD, FAST_SCRYPT) },
+      // 6 failed logins per 15 minutes pause the admin check (300 in production).
+      { lockoutOptions: { adminGuessLimit: 6, now: () => t } },
+    );
+  });
+  afterEach(async () => {
+    await srv.close();
+    vi.restoreAllMocks();
+  });
+
+  it('stops checking the admin password while too many logins fail, guests unaffected', async () => {
+    // A guest-password holder alternates a correct login (trusted key, failures cleared) with
+    // wrong guesses: never locked, but every failure feeds the admin-guess window.
+    for (let round = 0; round < 2; round += 1) {
+      expect((await login(srv.baseUrl)).res.status).toBe(200);
+      for (let i = 0; i < 3; i += 1) {
+        expect((await login(srv.baseUrl, `admin-guess-${round}-${i}`)).res.status).toBe(401);
+      }
+    }
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('admin_check_paused'));
+    // Even the right admin password now fails like a wrong one...
+    const admin = await login(srv.baseUrl, ADMIN_PASSWORD, '幹事');
+    expect(admin.res.status).toBe(401);
+    expect(await admin.res.json()).toEqual({ error: 'wrong_password' });
+    // ...while the guest password still works.
+    const guest = await login(srv.baseUrl);
+    expect(await guest.res.json()).toMatchObject({ ok: true, role: 'guest' });
+    // Once the failures have left the 15-minute window, the organiser gets in again.
+    t += 15 * 60 * 1000;
+    const later = await login(srv.baseUrl, ADMIN_PASSWORD, '幹事');
+    expect(await later.res.json()).toMatchObject({ ok: true, role: 'admin' });
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('admin_check_resumed'));
+  });
+});
+
+describe('tus route query strings', () => {
+  let srv;
+  beforeEach(async () => {
+    srv = await startServer();
+  });
+  afterEach(async () => {
+    await srv.close();
+  });
+
+  it('rejects any /files request with a query string before tus sees it', async () => {
+    const { cookie } = await login(srv.baseUrl);
+    const headers = { ...CSRF, Cookie: cookie, 'Tus-Resumable': '1.0.0' };
+    for (const [method, url] of [
+      ['POST', '/files?x=1'],
+      ['POST', '/files/?'],
+      ['PATCH', '/files/abc123?id=other'],
+      ['GET', '/files/abc123?x'],
+    ]) {
+      const res = await fetch(`${srv.baseUrl}${url}`, { method, headers });
+      expect(res.status, `${method} ${url}`).toBe(400);
+      expect(await res.json()).toEqual({ error: 'bad_request' });
+    }
+    const head = await fetch(`${srv.baseUrl}/files/abc123?x`, { method: 'HEAD', headers });
+    expect(head.status).toBe(400);
+    // Without a session too: the query is refused first.
+    const anon = await fetch(`${srv.baseUrl}/files/?x`, { method: 'POST', headers: CSRF });
+    expect(anon.status).toBe(400);
   });
 });
 
