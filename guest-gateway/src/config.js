@@ -134,7 +134,7 @@ export function loadConfig(env = process.env) {
     // Container path of the HDD mount marker file; empty disables the check (local dev/tests).
     mountMarker: env.MOUNT_MARKER ?? '',
     maxFileBytes: parsePositiveNumber('MAX_FILE_GB', env.MAX_FILE_GB, 4) * GIB,
-    minFreeBytes: parsePositiveNumber('MIN_FREE_GB', env.MIN_FREE_GB, 10) * GIB,
+    minFreeBytes: parsePositiveNumber('MIN_FREE_GB', env.MIN_FREE_GB, 50) * GIB,
     // Speed-test mode only: keep received files instead of deleting them.
     keepUploads: parseBool(env.KEEP_UPLOADS, false),
     immich: loadImmich(env),

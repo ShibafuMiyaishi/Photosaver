@@ -1,6 +1,6 @@
 // guest-gateway/scripts/event-status.js
 // 当日の状況確認: 取り込みの記録(DB)を読み取り専用で開き、件数・容量・受付期限までの残り時間・
-// HDD の空き(受信途中のアップロードがこれから書き込む分も)を表示する。ニックネームやファイル名は出さない(画面共有・報告にそのまま使える)。
+// HDD の空きと受信途中のアップロード(これから書き込む残り)を表示する。ニックネームやファイル名は出さない(画面共有・報告にそのまま使える)。
 // 動いている窓口コンテナの中で実行する(DB_PATH・CLOSES_AT・STAGING_DIR はコンテナの環境変数):
 //   docker exec guest_gateway node scripts/event-status.js
 
@@ -44,7 +44,8 @@ function formatDuration(ms) {
  * @param {ReturnType<ReturnType<typeof openStore>['stats']>} stats
  * @param {{ now: number, closesAt: number|null, freeBytes: number|null,
  *   receiving?: { count: number, bytes: number }|null }} context receiving: uploads still
- *   arriving in staging and the bytes they will still write (new uploads need that much on top)
+ *   arriving in staging and the bytes they will still write (for information: the gateway's
+ *   free-space check does not reserve them; MIN_FREE_GB is the margin for them)
  * @returns {{ lines: string[], warnings: string[] }}
  */
 export function formatStatus(stats, { now, closesAt, freeBytes, receiving = null }) {
@@ -109,7 +110,7 @@ async function main(env) {
   if (env.STAGING_DIR) {
     const fsStats = await fs.statfs(env.STAGING_DIR).catch(() => null);
     if (fsStats) freeBytes = fsStats.bavail * fsStats.bsize;
-    // Same disk scan as the gateway's free-space check (top-level tus info files).
+    // Uploads in progress, read from the top-level tus info files (display only).
     const inProgress = [...(await scanStaging(env.STAGING_DIR)).values()].filter(
       (u) => u.received !== null,
     );

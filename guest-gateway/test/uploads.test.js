@@ -61,6 +61,16 @@ describe('correctExtension', () => {
     expect(correctExtension('a.mov', 'video/3gpp2')?.filename).toBe('a.3gp');
   });
 
+  it('never turns a HEIF/AVIF name into a video one on a generic ISOBMFF (video/mp4) match', () => {
+    // file-type reports video/mp4 for ftyp brands it does not list (mif2, heim, heis, ...).
+    expect(correctExtension('IMG_0001.HEIC', 'video/mp4')).toBeNull();
+    expect(correctExtension('IMG_0001.heif', 'video/mp4')).toBeNull();
+    expect(correctExtension('IMG_0001.avif', 'video/mp4')).toBeNull();
+    // Specific video detections and other image names are still corrected.
+    expect(correctExtension('IMG_0001.HEIC', 'video/quicktime')?.filename).toBe('IMG_0001.mov');
+    expect(correctExtension('clip.jpg', 'video/mp4')?.filename).toBe('clip.mp4');
+  });
+
   it('does nothing for types outside the allowlist', () => {
     expect(correctExtension('a.jpg', 'application/pdf')).toBeNull();
     expect(correctExtension('a.jpg', 'unknown')).toBeNull();
