@@ -49,6 +49,9 @@ services:
       - ts
     environment:
       HOST: 127.0.0.1
+      # libuv's pool (default 4) runs both scrypt (~128 MiB, ~0.3 s per login) and file I/O for
+      # uploads; 8 keeps a login rush from stalling uploads (lockout allows 4 checks at once).
+      UV_THREADPOOL_SIZE: '8'
       PORT: '8080'
       STAGING_DIR: /data/staging
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}

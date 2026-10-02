@@ -807,20 +807,44 @@ function loginFailureText(status) {
   return `ログインできませんでした(${status})。もう一度お試しください。`;
 }
 
+// The server runs one password check per address at a time (scrypt takes ~0.3 s), so guests
+// sharing the venue Wi-Fi often get 429 'busy' in a rush. Retry those quietly a few times.
+const LOGIN_BUSY_RETRIES = 5;
+
+/** Read the 429 error code without consuming the response for later readers. */
+async function loginErrorCode(res) {
+  const { error } = await res
+    .clone()
+    .json()
+    .catch(() => ({}));
+  return error;
+}
+
 async function submitLogin() {
   let res;
+  const body = JSON.stringify({ nickname: $('nickname').value, password: $('password').value });
   try {
-    res = await api('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nickname: $('nickname').value, password: $('password').value }),
-    });
+    for (let attempt = 0; ; attempt += 1) {
+      res = await api('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (res.status !== 429 || attempt >= LOGIN_BUSY_RETRIES) break;
+      if ((await loginErrorCode(res)) !== 'busy') break;
+      $('login-error').textContent = '混み合っています。自動でもう一度試しています…';
+      const retryAfterSec = Number(res.headers.get('Retry-After')) || 1;
+      await new Promise((resolve) => {
+        setTimeout(resolve, retryAfterSec * 1000 + Math.random() * 1000);
+      });
+    }
   } catch (err) {
     if (err.message !== 'closed') {
       $('login-error').textContent = '通信エラーです。電波の良い場所でもう一度お試しください。';
     }
     return;
   }
+  $('login-error').textContent = '';
   if (res.ok) {
     $('password').value = '';
     const { role, nickname: normalized } = await res.json().catch(() => ({}));
@@ -843,7 +867,7 @@ async function submitLogin() {
     const { error } = await res.json().catch(() => ({}));
     $('login-error').textContent =
       error === 'busy'
-        ? '処理中です。少し待ってからもう一度お試しください。'
+        ? '混み合っています。少し待ってからもう一度お試しください。'
         : '試行回数が多すぎます。しばらく待ってから再度お試しください。';
   } else if (res.status === 400) {
     const { error } = await res.json().catch(() => ({}));
