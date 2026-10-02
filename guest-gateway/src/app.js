@@ -102,6 +102,7 @@ export function createApp(config, { store, importer, immich } = {}) {
             store.add(file);
             importer.enqueue(file.uploadId);
           },
+          findReceived: (uploadId) => store.get(uploadId),
         }
       : {},
   );

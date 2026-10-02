@@ -1,6 +1,7 @@
 // guest-gateway/src/index.js
 // 起動エントリ。設定検証 → HDD マーカー・ステージング先の確認 → (取り込みモードなら)記録 DB と
-// 取り込みキューの準備・未完了分の再開 → HTTP 待ち受け → 定期処理(期限切れの掃除)。
+// 取り込みキューの準備・未完了分の再開 → 受信し終えたのに完了処理前に止まったファイルの拾い直し →
+// HTTP 待ち受け → 定期処理(期限切れの掃除)。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -74,6 +75,15 @@ if (config.immich) {
 }
 
 const { app, tusServer, isClosed } = createApp(config, { store, importer, immich });
+
+// Before accepting requests: finish uploads whose last bytes arrived but whose finish step
+// (move + record) never ran because the process stopped in between.
+try {
+  log('info', 'staging_reconcile_done', { repaired: await tusServer.reconcile() });
+} catch (err) {
+  // Not fatal: the affected uploads stay in staging and the next start tries again.
+  log('error', 'staging_reconcile_failed', { error: err.message });
+}
 
 const server = app.listen(config.port, config.host, () => {
   log('info', 'listening', {
